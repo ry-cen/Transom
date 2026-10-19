@@ -103,9 +103,12 @@ If the Mac has Sill's Remote Access on, reach it by address (port 7455 unless yo
 `--port`):
 
 ```sh
-transom pair --mac NAME --host ADDRESS --remote --code "4829 1355 7208"
-transom connect --mac NAME --host ADDRESS --remote
+transom connect --host ADDRESS --remote
 ```
+
+Pair first, at home on the same network as the Mac (`transom pair`): the remote door only
+takes devices that are already paired. With more than one saved Mac, add `--mac NAME` (a
+part of the name, or the start of its Mac ID, is enough).
 
 Remote sessions have not been tested against a real Mac yet.
 

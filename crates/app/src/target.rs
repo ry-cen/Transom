@@ -94,6 +94,31 @@ fn route_for_found(f: &FoundMac, plain: bool, saved: &[SavedMac]) -> Result<Rout
     }
 }
 
+/// The saved Mac whose pin an address is dialled with: the one `--mac` names, or the only
+/// saved Mac when `--mac` is left out.
+fn saved_for_address(query: Option<&str>, store: &Store) -> Result<SavedMac> {
+    let macs = store.macs().map_err(|e| anyhow!("{e}"))?;
+    if macs.is_empty() {
+        bail!("no Mac is paired yet. Pair first, on the same network as the Mac: transom pair");
+    }
+    let names = || {
+        macs.iter()
+            .map(|m| m.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    match query {
+        Some(q) => store
+            .find(q)
+            .map_err(|e| anyhow!("{e}"))?
+            .ok_or_else(|| anyhow!("no saved Mac matches {q}. Saved Macs: {}", names())),
+        None => match macs.as_slice() {
+            [one] => Ok(one.clone()),
+            _ => bail!("several saved Macs: use --mac ({})", names()),
+        },
+    }
+}
+
 pub fn resolve(t: &TargetArgs, store: &Store, _rt: &Runtime) -> Result<Route> {
     if let Some(host) = &t.host {
         let port = match (t.port, t.remote) {
@@ -103,9 +128,13 @@ pub fn resolve(t: &TargetArgs, store: &Store, _rt: &Runtime) -> Result<Route> {
                 "give --port (the home door's port changes at every launch; use --mac to find it by Bonjour) or --remote"
             ),
         };
-        let saved = match &t.mac {
-            Some(name) => store.find(name).map_err(|e| anyhow!("{e}"))?,
-            None => None,
+        let saved = if t.any_key || t.plain {
+            match &t.mac {
+                Some(name) => store.find(name).map_err(|e| anyhow!("{e}"))?,
+                None => None,
+            }
+        } else {
+            Some(saved_for_address(t.mac.as_deref(), store)?)
         };
         let label = saved
             .as_ref()

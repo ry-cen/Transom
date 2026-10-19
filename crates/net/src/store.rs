@@ -182,9 +182,17 @@ impl Store {
         if let Some(m) = macs.iter().find(|m| m.mac_id == query) {
             return Ok(Some(m.clone()));
         }
-        let lower = query.to_lowercase();
-        if let Some(m) = macs.iter().find(|m| m.name.to_lowercase() == lower) {
+        let wanted = name_key(query);
+        if let Some(m) = macs.iter().find(|m| name_key(&m.name) == wanted) {
             return Ok(Some(m.clone()));
+        }
+        if wanted.chars().count() >= 3 {
+            let mut hits = macs
+                .iter()
+                .filter(|m| name_key(&m.name).starts_with(&wanted));
+            if let (Some(first), None) = (hits.next(), hits.next()) {
+                return Ok(Some(first.clone()));
+            }
         }
         if query.chars().count() >= 4 {
             let upper = query.to_uppercase();
@@ -195,6 +203,19 @@ impl Store {
         }
         Ok(None)
     }
+}
+
+/// A Mac name as `find` compares it: trimmed, lowercased, and with curly apostrophes made
+/// straight, so "Ryan's MacBook Pro" typed in a terminal matches Bonjour's "Ryan’s MacBook Pro".
+fn name_key(name: &str) -> String {
+    name.trim()
+        .to_lowercase()
+        .chars()
+        .map(|c| match c {
+            '\u{2019}' | '\u{2018}' | '\u{02BC}' => '\'',
+            other => other,
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -269,6 +290,24 @@ mod tests {
         assert!(store.find("AAAA").unwrap().is_none());
         assert!(store.find("AAA").unwrap().is_none());
         assert!(store.find("zzzz").unwrap().is_none());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn find_tolerates_apostrophes_and_prefixes() {
+        let dir = temp_dir();
+        let store = Store::open(Some(dir.clone())).unwrap();
+        store
+            .save_mac(mac("AAAA1111BBBB2222", "Ryan\u{2019}s MacBook Pro"))
+            .unwrap();
+        store.save_mac(mac("CCCC1111DDDD2222", "Studio")).unwrap();
+        let want = Some("AAAA1111BBBB2222".to_string());
+        let id = |q: &str| store.find(q).unwrap().map(|m| m.mac_id);
+        assert_eq!(id("Ryan's MacBook Pro"), want);
+        assert_eq!(id("  ryan's macbook pro "), want);
+        assert_eq!(id("ryan"), want);
+        assert_eq!(id("ry"), None);
+        assert_eq!(id("stu"), Some("CCCC1111DDDD2222".to_string()));
         let _ = std::fs::remove_dir_all(dir);
     }
 
