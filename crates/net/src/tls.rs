@@ -7,6 +7,7 @@ use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, Server
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName, UnixTime};
 use rustls::{AlertDescription, CertificateError, DigitallySignedStruct, SignatureScheme};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use tokio::net::TcpStream;
 use transom_proto::identity::fingerprint_of_certificate;
 
@@ -139,7 +140,8 @@ pub async fn connect(
     let cfg = client_config(id, alpn, pin, seen.clone())?;
     let name = ServerName::try_from(SNI).map_err(|e| NetError::Tls(e.to_string()))?;
     let connector = tokio_rustls::TlsConnector::from(cfg);
-    let tls = match connector.connect(name, tcp).await {
+    let started = Instant::now();
+    let mut tls = match connector.connect(name, tcp).await {
         Ok(t) => t,
         Err(e) => {
             if let (PinPolicy::Pinned(p), Some(other)) = (pin, seen.get()) {
@@ -157,23 +159,104 @@ pub async fn connect(
     let fp = seen
         .get()
         .ok_or_else(|| NetError::Tls("the Mac sent no certificate".into()))?;
+    // A pairing door takes any key, so only a session can be refused after the handshake.
+    if alpn == SESSION_ALPN {
+        await_post_handshake_rejection(&mut tls, reject_wait_budget(started.elapsed())).await?;
+    }
     Ok((tls, fp))
+}
+
+/// The shortest time `connect` waits for a post-handshake rejection.
+pub(crate) const MIN_REJECT_WAIT: Duration = Duration::from_millis(100);
+/// The longest time `connect` waits for a post-handshake rejection.
+pub(crate) const MAX_REJECT_WAIT: Duration = Duration::from_millis(500);
+
+/// How long `connect` listens for a rejection after the handshake: 1.5 times the handshake
+/// duration, clamped to 100 ms..=500 ms. The floor covers a host task preempted for a
+/// scheduler quantum (about 16 ms on Windows) several times over.
+pub(crate) fn reject_wait_budget(handshake: Duration) -> Duration {
+    (handshake.saturating_mul(3) / 2).clamp(MIN_REJECT_WAIT, MAX_REJECT_WAIT)
+}
+
+/// In TLS 1.3 the client finishes its handshake before the host has checked the client key. A
+/// host that refuses the key sends a fatal alert and closes. If we wrote our first message at
+/// once, the host's TCP stack could answer it with a reset, and Windows throws away received but
+/// unread data on a reset, so the alert would be lost and the refusal would look like a dropped
+/// connection. So, for `budget`, write nothing and only listen. The bytes go straight from the
+/// socket into rustls, without the `TlsStream` read path, so that plaintext the host sent first
+/// stays buffered inside rustls for the next `poll_read`.
+async fn await_post_handshake_rejection(
+    tls: &mut tokio_rustls::client::TlsStream<TcpStream>,
+    budget: Duration,
+) -> Result<(), NetError> {
+    let deadline = tokio::time::Instant::now() + budget;
+    let mut buf = [0u8; 4096];
+    let (tcp, conn) = tls.get_mut();
+    if !conn.wants_read() {
+        // The handshake's last read already left plaintext in rustls: the host spoke first.
+        return Ok(());
+    }
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return Ok(());
+        }
+        match tokio::time::timeout(remaining, tcp.readable()).await {
+            Err(_) => return Ok(()),
+            Ok(Err(e)) => return Err(classify_io_error(e)),
+            Ok(Ok(())) => {}
+        }
+        match tcp.try_read(&mut buf) {
+            Ok(0) => return Err(NetError::Closed),
+            Ok(n) => {
+                if feed_rustls(conn, &buf[..n])? {
+                    return Ok(());
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(e) => return Err(classify_io_error(e)),
+        }
+    }
+}
+
+/// Gives `data`, all of it, to rustls. Ok(true) when plaintext is now waiting to be read or the
+/// host closed cleanly; Ok(false) for handshake leftovers and partial records.
+fn feed_rustls(conn: &mut rustls::ClientConnection, mut data: &[u8]) -> Result<bool, NetError> {
+    let mut done = false;
+    while !data.is_empty() {
+        let taken = conn
+            .read_tls(&mut data)
+            .map_err(|e| NetError::Tls(e.to_string()))?;
+        if taken == 0 {
+            return Err(NetError::Tls("the TLS input buffer is full".into()));
+        }
+        let state = conn
+            .process_new_packets()
+            .map_err(|e| classify_tls_error(&e))?;
+        done |= state.plaintext_bytes_to_read() > 0 || state.peer_has_closed();
+    }
+    Ok(done)
+}
+
+/// A rustls error to NetError. A fatal alert about our certificate means the Mac does not know us.
+fn classify_tls_error(e: &rustls::Error) -> NetError {
+    match e {
+        rustls::Error::AlertReceived(
+            AlertDescription::CertificateUnknown
+            | AlertDescription::AccessDenied
+            | AlertDescription::BadCertificate
+            | AlertDescription::UnknownCA
+            | AlertDescription::CertificateRequired,
+        ) => NetError::NotPaired,
+        other => NetError::Tls(other.to_string()),
+    }
 }
 
 /// io::Error to NetError. A fatal alert about our certificate means the Mac does not know us.
 pub fn classify_io_error(e: std::io::Error) -> NetError {
     use std::io::ErrorKind as K;
     if let Some(inner) = e.get_ref().and_then(|i| i.downcast_ref::<rustls::Error>()) {
-        return match inner {
-            rustls::Error::AlertReceived(
-                AlertDescription::CertificateUnknown
-                | AlertDescription::AccessDenied
-                | AlertDescription::BadCertificate
-                | AlertDescription::UnknownCA
-                | AlertDescription::CertificateRequired,
-            ) => NetError::NotPaired,
-            other => NetError::Tls(other.to_string()),
-        };
+        return classify_tls_error(inner);
     }
     match e.kind() {
         K::UnexpectedEof | K::ConnectionReset | K::BrokenPipe => NetError::Closed,
@@ -193,6 +276,18 @@ mod tests {
             rustls::Error::AlertReceived(AlertDescription::CertificateUnknown),
         );
         assert!(matches!(classify_io_error(e), NetError::NotPaired));
+    }
+
+    #[test]
+    fn reject_budget_is_clamped() {
+        let ms = Duration::from_millis;
+        assert_eq!(reject_wait_budget(Duration::ZERO), ms(100));
+        assert_eq!(reject_wait_budget(ms(10)), ms(100));
+        assert_eq!(reject_wait_budget(ms(20)), ms(100));
+        assert_eq!(reject_wait_budget(ms(100)), ms(150));
+        assert_eq!(reject_wait_budget(ms(400)), ms(500));
+        assert_eq!(reject_wait_budget(Duration::from_secs(60)), ms(500));
+        assert_eq!(reject_wait_budget(Duration::MAX), ms(500));
     }
 
     #[test]

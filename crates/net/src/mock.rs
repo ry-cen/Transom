@@ -9,11 +9,14 @@ use rcgen::PublicKeyData;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, UnixTime};
 use rustls::server::danger::{ClientCertVerified, ClientCertVerifier};
 use rustls::{DigitallySignedStruct, DistinguishedName, SignatureScheme};
+use std::io::Read;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll};
 use std::time::Duration;
-use tokio::io::{AsyncRead, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, Notify};
 use transom_proto::blobs::CursorShape;
@@ -51,6 +54,17 @@ pub struct MockConfig {
     pub goodbye_only_first: bool,
     /// Send a kind 2 header announcing 5 MiB right after the hello.
     pub oversized_after_hello: bool,
+    /// On a TLS connection that fails its handshake (a rejected client key), count every byte
+    /// the client sent, keep reading the socket for about 300 ms after the alert, and report the
+    /// total as `MockEvent::RejectedClientBytes`. The probe holds a second handle on the socket
+    /// for about 300 ms, so in this mode the client sees the alert without a prompt close.
+    pub count_rejected_bytes: bool,
+    /// Wait this long after reading the ClientHello, before answering it. Makes the client's
+    /// measured handshake (and so its post-handshake wait) longer.
+    pub handshake_delay: Option<Duration>,
+    /// Send the first WindowList right after the handshake, before reading the client's hello,
+    /// and no second one after it.
+    pub host_speaks_first: bool,
 }
 
 impl Default for MockConfig {
@@ -77,6 +91,9 @@ impl Default for MockConfig {
             goodbye_after_select: None,
             goodbye_only_first: false,
             oversized_after_hello: false,
+            count_rejected_bytes: false,
+            handshake_delay: None,
+            host_speaks_first: false,
         }
     }
 }
@@ -92,6 +109,9 @@ pub enum MockEvent {
     Ping,
     Pair(PairRequest),
     Unknown(u8),
+    /// Total bytes (ClientHello included) a client sent on a connection whose TLS handshake
+    /// failed; only with `MockConfig::count_rejected_bytes`.
+    RejectedClientBytes(usize),
     Disconnected,
 }
 
@@ -313,14 +333,89 @@ impl ClientCertVerifier for MockVerifier {
     }
 }
 
+/// A TCP stream that counts the bytes read from it.
+struct CountingIo {
+    inner: TcpStream,
+    count: Arc<AtomicUsize>,
+}
+
+impl AsyncRead for CountingIo {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let before = buf.filled().len();
+        let r = Pin::new(&mut self.inner).poll_read(cx, buf);
+        if matches!(r, Poll::Ready(Ok(()))) {
+            let n = buf.filled().len() - before;
+            self.count.fetch_add(n, Ordering::SeqCst);
+        }
+        r
+    }
+}
+
+impl AsyncWrite for CountingIo {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        Pin::new(&mut self.inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
+}
+
+/// Reads what the client still sends on a duplicate of the socket, for up to 300 ms or until it
+/// closes. Returns the byte count.
+async fn drain_probe(mut probe: std::net::TcpStream) -> usize {
+    let end = tokio::time::Instant::now() + Duration::from_millis(300);
+    let mut total = 0;
+    let mut buf = [0u8; 4096];
+    while tokio::time::Instant::now() < end {
+        match probe.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => total += n,
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            Err(_) => break,
+        }
+    }
+    total
+}
+
 async fn handle_connection(tcp: TcpStream, shared: Arc<Shared>) -> std::io::Result<()> {
     tcp.set_nodelay(true)?;
     if !shared.cfg.tls {
         handle_session(Box::new(tcp), shared).await;
         return Ok(());
     }
+    // A duplicate handle on the socket, so the bytes a rejected client still sends can be read
+    // after the TLS acceptor has given up (and dropped) its own handle.
+    let (tcp, mut probe) = if shared.cfg.count_rejected_bytes {
+        let std_tcp = tcp.into_std()?;
+        let probe = std_tcp.try_clone()?;
+        probe.set_nonblocking(true)?;
+        (TcpStream::from_std(std_tcp)?, Some(probe))
+    } else {
+        (tcp, None)
+    };
+    let count = Arc::new(AtomicUsize::new(0));
+    let counting = CountingIo {
+        inner: tcp,
+        count: count.clone(),
+    };
     let start =
-        tokio_rustls::LazyConfigAcceptor::new(rustls::server::Acceptor::default(), tcp).await?;
+        tokio_rustls::LazyConfigAcceptor::new(rustls::server::Acceptor::default(), counting)
+            .await?;
     let offered: Vec<Vec<u8>> = start
         .client_hello()
         .alpn()
@@ -334,7 +429,22 @@ async fn handle_connection(tcp: TcpStream, shared: Arc<Shared>) -> std::io::Resu
     } else {
         return Ok(());
     };
-    let tls = start.into_stream(config).await?;
+    if let Some(d) = shared.cfg.handshake_delay {
+        tokio::time::sleep(d).await;
+    }
+    let tls = match start.into_stream(config).await {
+        Ok(t) => t,
+        Err(e) => {
+            if let Some(p) = probe.take() {
+                let extra = drain_probe(p).await;
+                shared.emit(MockEvent::RejectedClientBytes(
+                    count.load(Ordering::SeqCst) + extra,
+                ));
+            }
+            return Err(e);
+        }
+    };
+    drop(probe);
     let client_fp = tls
         .get_ref()
         .1
@@ -471,6 +581,12 @@ async fn handle_session(io: BoxIo, shared: Arc<Shared>) {
 
 async fn session_inner(io: BoxIo, shared: &Arc<Shared>) {
     let (mut rd, mut wr) = tokio::io::split(io);
+    if shared.cfg.host_speaks_first {
+        let list = window_list(shared, StreamSource::None {});
+        if wr.write_all(&list).await.is_err() || wr.flush().await.is_err() {
+            return;
+        }
+    }
     let first = tokio::time::timeout(
         Duration::from_secs(10),
         read_message(&mut rd, |_| MAX_CLIENT_PAYLOAD, || {}),
@@ -516,7 +632,9 @@ async fn session_inner(io: BoxIo, shared: &Arc<Shared>) {
     }
 
     let mut active = StreamSource::None {};
-    let _ = otx.send(Out::Data(window_list(shared, active)));
+    if !shared.cfg.host_speaks_first {
+        let _ = otx.send(Out::Data(window_list(shared, active)));
+    }
     if let Some(c) = &shared.cfg.cursor {
         send(kind::CURSOR_SHAPE, &c.encode());
     }

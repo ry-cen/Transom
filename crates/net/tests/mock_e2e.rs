@@ -12,13 +12,14 @@ use transom_net::session::{
 use transom_net::supervisor::{
     open, spawn_supervisor, Endpoint, Route, SessionHandle, SupervisorConfig, Trust,
 };
-use transom_net::tls::{PinPolicy, SESSION_ALPN};
+use transom_net::tls::{self, PeerKey, PinPolicy, SESSION_ALPN};
 use transom_net::NetError;
 use transom_proto::compat::client_hello;
 use transom_proto::identity::mac_id;
 use transom_proto::messages::{Goodbye, InputEvent, PointerAction, StreamSource};
 use transom_proto::pairlink::PairLink;
 use transom_proto::video::{host_packets_from_annexb, VideoPacket};
+use transom_proto::wire::{kind, Header, HEADER_LEN};
 
 const TINY: &[u8] = include_bytes!("../../video/tests/fixtures/tiny.hevc");
 
@@ -258,6 +259,126 @@ async fn unpaired_key_is_not_paired() {
         }
         other => panic!("unexpected: {other:?}"),
     }
+}
+
+/// The bytes a rejected client sent in total, as the mock counted them.
+async fn rejected_bytes(host: &MockHost) -> usize {
+    match next_matching(host.events(), WAIT, |e| {
+        matches!(e, MockEvent::RejectedClientBytes(_))
+    })
+    .await
+    {
+        Some(MockEvent::RejectedClientBytes(n)) => n,
+        other => panic!("no RejectedClientBytes: {other:?}"),
+    }
+}
+
+/// A mock that counts what a rejected client sends and answers slowly enough that the client's
+/// post-handshake wait is long compared with scheduler jitter.
+fn counting_config() -> MockConfig {
+    MockConfig {
+        count_rejected_bytes: true,
+        handshake_delay: Some(Duration::from_millis(50)),
+        ..MockConfig::default()
+    }
+}
+
+/// The client must write nothing between finishing its handshake and the host's alert. Without
+/// the wait in `tls::connect` the hello goes out at once, and a host on Windows answers it with a
+/// reset that destroys the unread alert. The total byte count of a rejected connection is
+/// compared with a handshake-only baseline from a raw client that writes nothing after its
+/// Finished.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unpaired_client_writes_nothing_before_the_alert() {
+    let id = id();
+
+    let baseline_host = MockHost::start(counting_config()).await.unwrap();
+    let cfg = tls::client_config(&id, SESSION_ALPN, PinPolicy::AnyKey, PeerKey::default()).unwrap();
+    let tcp = tokio::net::TcpStream::connect(baseline_host.addr)
+        .await
+        .unwrap();
+    let name = rustls::pki_types::ServerName::try_from("sill").unwrap();
+    let mut raw = tokio_rustls::TlsConnector::from(cfg)
+        .connect(name, tcp)
+        .await
+        .unwrap();
+    let mut one = [0u8; 1];
+    let read = tokio::io::AsyncReadExt::read(&mut raw, &mut one).await;
+    assert!(read.is_err(), "the raw client saw no alert: {read:?}");
+    drop(raw);
+    let baseline = rejected_bytes(&baseline_host).await;
+    assert!(baseline > 0);
+
+    let host = MockHost::start(counting_config()).await.unwrap();
+    let r = start_session(&host, &id, Trust::Pinned(host.fingerprint));
+    let total = rejected_bytes(&host).await;
+    // A signature's DER length varies by a byte or two; the hello record is over 100 bytes.
+    assert!(
+        total <= baseline + 8,
+        "the client wrote {} bytes after its handshake",
+        total.saturating_sub(baseline)
+    );
+    let finished = next_matching(&r.events, WAIT, |e| {
+        matches!(e, SessionEvent::Finished { .. })
+    })
+    .await;
+    match finished {
+        Some(SessionEvent::Finished { text }) => {
+            assert!(text.contains("Pair it first"), "{text}")
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
+fn speaks_first_config() -> MockConfig {
+    MockConfig {
+        host_speaks_first: true,
+        handshake_delay: Some(Duration::from_millis(50)),
+        ..MockConfig::default()
+    }
+}
+
+/// A host that talks before any hello (an older host, say) must not lose that message to the
+/// post-handshake wait.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn host_that_speaks_first_is_heard() {
+    let host = MockHost::start(speaks_first_config()).await.unwrap();
+    let id = id();
+    host.pair_key(id.fingerprint);
+    let r = start_session(&host, &id, Trust::Pinned(host.fingerprint));
+    connected(&r).await;
+    let first = next_matching(host.events(), WAIT, |e| {
+        matches!(e, MockEvent::FirstKind(_))
+    })
+    .await;
+    assert!(matches!(first, Some(MockEvent::FirstKind(23))), "{first:?}");
+    r.handle.close();
+}
+
+/// The same, one level down: when `tls::connect` returns, the host's message is already inside
+/// rustls (not read from the socket), and the stream still delivers it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn first_host_message_stays_buffered_in_rustls() {
+    let host = MockHost::start(speaks_first_config()).await.unwrap();
+    let id = id();
+    host.pair_key(id.fingerprint);
+    let tcp = tokio::net::TcpStream::connect(host.addr).await.unwrap();
+    let (mut tls, _) = tls::connect(tcp, &id, SESSION_ALPN, PinPolicy::Pinned(host.fingerprint))
+        .await
+        .unwrap();
+    assert!(
+        !tls.get_ref().1.wants_read(),
+        "the wait ended without taking in the host's message"
+    );
+    let mut head = [0u8; HEADER_LEN];
+    tokio::time::timeout(
+        WAIT,
+        tokio::io::AsyncReadExt::read_exact(&mut tls, &mut head),
+    )
+    .await
+    .expect("timed out")
+    .unwrap();
+    assert_eq!(Header::parse(&head).kind, kind::WINDOW_LIST);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
