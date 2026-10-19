@@ -1,0 +1,31 @@
+[package]
+name = "transom"
+description = "View and control a Mac running Sill from Linux, Windows or macOS."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "transom"
+path = "src/main.rs"
+
+[features]
+default = ["video"]
+# The viewer window (`transom connect`). Without it the CLI still discovers, pairs and lists
+# windows, and builds on a machine without FFmpeg's development files.
+video = ["dep:transom-video"]
+
+[dependencies]
+transom-proto.workspace = true
+transom-net.workspace = true
+transom-video = { workspace = true, optional = true }
+transom-render.workspace = true
+transom-input.workspace = true
+winit.workspace = true
+tokio.workspace = true
+crossbeam-channel.workspace = true
+clap.workspace = true
+anyhow.workspace = true
+log.workspace = true
+env_logger.workspace = true

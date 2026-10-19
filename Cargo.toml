@@ -1,0 +1,64 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/proto",
+    "crates/video",
+    "crates/render",
+    "crates/input",
+    "crates/net",
+    "crates/app",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/ry-cen/sill_port"
+
+# Every dependency of every crate is pinned here, once, in Wave 0. Work packages never add a
+# dependency or a feature: a package that needs one stops and reports (brief, Stop conditions).
+[workspace.dependencies]
+transom-proto = { path = "crates/proto" }
+transom-video = { path = "crates/video" }
+transom-render = { path = "crates/render" }
+transom-input = { path = "crates/input" }
+transom-net = { path = "crates/net" }
+
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+sha2 = "0.11.1"
+hmac = "0.13.0"
+pbkdf2 = { version = "0.13.0", default-features = false, features = ["hmac"] }
+p256 = { version = "0.14.0", default-features = false, features = ["ecdsa", "std"] }
+base64 = "0.23.1"
+percent-encoding = "2.3.2"
+thiserror = "2.0.21"
+anyhow = "1.0.104"
+log = "0.4.34"
+env_logger = "0.11.11"
+hex = "0.4.3"
+getrandom = "0.4.3"
+crossbeam-channel = "0.5.17"
+
+# TLS: the ring provider everywhere (no aws-lc-rs: no cmake or NASM on Windows CI).
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "logging"] }
+tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring"] }
+tokio = { version = "1.54.0", features = ["rt-multi-thread", "net", "io-util", "time", "macros", "sync"] }
+rcgen = { version = "0.14.10", default-features = false, features = ["ring", "pem"] }
+mdns-sd = "0.21.6"
+directories = "6.0.0"
+
+# Video decode. ffmpeg-next 9.0.0 does not compile with "codec" alone: "format" is required.
+ffmpeg-next = { version = "9.0.0", default-features = false, features = ["codec", "format", "software-scaling"] }
+
+# Window, GPU, cursor images, CLI.
+winit = "0.30.13"
+wgpu = "30.0.1"
+pollster = "1.0.1"
+image = { version = "0.25.10", default-features = false, features = ["png"] }
+clap = { version = "4.6.7", features = ["derive"] }
+
+# Dependencies optimised in debug builds too: PBKDF2's 600,000 rounds (about 0.7 s instead of
+# many seconds, inside the host's 10 s pairing deadline) and software HEVC decoding.
+[profile.dev.package."*"]
+opt-level = 3

@@ -1,0 +1,14 @@
+[package]
+name = "transom-input"
+description = "Maps winit keyboard, mouse and scroll events to Sill input events. Pure: no I/O."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+transom-proto.workspace = true
+winit.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

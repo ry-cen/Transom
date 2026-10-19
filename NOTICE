@@ -1,0 +1,12 @@
+Transom
+Copyright 2026 The Transom authors
+
+This product is a client for Sill (https://github.com/Saffsanity/sill),
+Copyright 2026 Noah Saffer, licensed under the Apache License, Version 2.0.
+
+Transom implements Sill's wire protocol. Its message layouts, JSON shapes,
+pairing derivations, payload limits and test vectors were transcribed from
+Sill's sources (Sources/StreamProtocol, Scripts/sillclient.py and the
+documents under docs/), and the comments that describe them paraphrase those
+sources. Transom contains no Swift code from Sill. It is not affiliated with
+or endorsed by Sill or its author.

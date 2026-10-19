@@ -1,0 +1,14 @@
+[package]
+name = "transom-video"
+description = "HEVC decoding (FFmpeg, software) of the host's length-prefixed access units."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+transom-proto.workspace = true
+ffmpeg-next.workspace = true
+crossbeam-channel.workspace = true
+log.workspace = true
+thiserror.workspace = true
