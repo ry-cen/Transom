@@ -4176,7 +4176,7 @@ dependencies = [
 
 [[package]]
 name = "transom"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -4201,7 +4201,7 @@ dependencies = [
 
 [[package]]
 name = "transom-input"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde_json",
  "transom-proto",
@@ -4210,7 +4210,7 @@ dependencies = [
 
 [[package]]
 name = "transom-net"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "base64",
  "crossbeam-channel",
@@ -4233,7 +4233,7 @@ dependencies = [
 
 [[package]]
 name = "transom-proto"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "base64",
  "hex",
@@ -4249,7 +4249,7 @@ dependencies = [
 
 [[package]]
 name = "transom-render"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "image",
@@ -4262,7 +4262,7 @@ dependencies = [
 
 [[package]]
 name = "transom-video"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "crossbeam-channel",
  "ffmpeg-next",

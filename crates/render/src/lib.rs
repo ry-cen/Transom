@@ -112,12 +112,25 @@ impl Renderer {
     pub fn new(instance: &wgpu::Instance, window: Arc<Window>) -> anyhow::Result<Self> {
         let size = window.inner_size();
         let surface = instance.create_surface(window)?;
+        // The fast GPU: on a desktop with an enabled integrated GPU (every Ryzen 7000, many Intel
+        // chips) the low-power one cannot keep up with 4K. `WGPU_POWER_PREF=low` overrides it.
+        let power_preference =
+            wgpu::PowerPreference::from_env().unwrap_or(wgpu::PowerPreference::HighPerformance);
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::LowPower,
+            power_preference,
             force_fallback_adapter: false,
             compatible_surface: Some(&surface),
             ..Default::default()
         }))?;
+        let info = adapter.get_info();
+        log::info!(
+            "GPU: {} ({:?}, {:?}, driver {} {})",
+            info.name,
+            info.device_type,
+            info.backend,
+            info.driver,
+            info.driver_info
+        );
         let (device, queue) =
             pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
                 label: Some("transom"),
