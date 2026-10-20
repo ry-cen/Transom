@@ -1,5 +1,6 @@
-//! Draws decoded 8-bit 4:2:0 frames, letterboxed on black, into a winit window with wgpu; the
-//! YUV to RGB conversion runs in the fragment shader. Wave 0 ships the renderer complete (it was
+//! Draws decoded 8-bit 4:2:0 frames (I420 or NV12), letterboxed on black, into a winit window with
+//! wgpu; the YUV to RGB conversion runs in the fragment shader. NV12's interleaved UV plane is
+//! uploaded as an Rg8 texture and sampled from it. Wave 0 ships the renderer complete (it was
 //! compiled and run against wgpu 30.0.1 and winit 0.30.13 on macOS). WP3 adds `pub mod cursor;`
 //! and the tests, and changes nothing else here without a reason it reports. The app reaches
 //! wgpu through the `wgpu` re-export below (it has no wgpu dependency of its own).
@@ -11,6 +12,10 @@ pub use wgpu;
 use winit::window::Window;
 
 pub mod cursor;
+mod frame;
+
+use frame::{plane_copies, PlaneCopy};
+pub use frame::{Chroma, FrameError, YuvFrame};
 
 const SHADER: &str = r#"
 struct VsOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
@@ -24,7 +29,7 @@ fn vs_main(@builtin(vertex_index) i: u32) -> VsOut {
     o.uv = vec2((p[i].x + 1.0) * 0.5, 1.0 - (p[i].y + 1.0) * 0.5);
     return o;
 }
-struct Params { full_range: u32, bt601: u32, pad0: u32, pad1: u32 };
+struct Params { full_range: u32, bt601: u32, nv12: u32, pad1: u32 };
 @group(0) @binding(0) var tex_y: texture_2d<f32>;
 @group(0) @binding(1) var tex_u: texture_2d<f32>;
 @group(0) @binding(2) var tex_v: texture_2d<f32>;
@@ -33,8 +38,10 @@ struct Params { full_range: u32, bt601: u32, pad0: u32, pad1: u32 };
 @fragment
 fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
     var y = textureSample(tex_y, samp, v.uv).r;
-    var cb = textureSample(tex_u, samp, v.uv).r - 0.5;
-    var cr = textureSample(tex_v, samp, v.uv).r - 0.5;
+    let c0 = textureSample(tex_u, samp, v.uv);
+    let c1 = textureSample(tex_v, samp, v.uv);
+    var cb = c0.r - 0.5;
+    var cr = select(c1.r, c0.g, params.nv12 == 1u) - 0.5;
     if (params.full_range == 0u) {
         y = (y - 16.0 / 255.0) * (255.0 / 219.0);
         cb = cb * (255.0 / 224.0);
@@ -75,34 +82,20 @@ pub struct Renderer {
     layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
     params: wgpu::Buffer,
+    dummy: wgpu::TextureView,
+    bad_frame_logged: bool,
     video: Option<Planes>,
 }
 
-/// The three plane textures of the current frame size and the bind group over them.
+/// The plane textures of the current frame size and layout, and the bind group over them.
 struct Planes {
     y: wgpu::Texture,
-    u: wgpu::Texture,
-    v: wgpu::Texture,
+    c0: wgpu::Texture,
+    c1: Option<wgpu::Texture>,
     bind: wgpu::BindGroup,
     width: u32,
     height: u32,
-}
-
-/// One decoded picture as the renderer takes it: 8-bit 4:2:0 planes, each row `stride` bytes apart
-/// (stride >= the plane's width). Chroma planes are ((width + 1) / 2) x ((height + 1) / 2).
-pub struct YuvFrame<'a> {
-    pub width: u32,
-    pub height: u32,
-    pub y: &'a [u8],
-    pub y_stride: u32,
-    pub u: &'a [u8],
-    pub u_stride: u32,
-    pub v: &'a [u8],
-    pub v_stride: u32,
-    /// Full (0-255) rather than limited (16-235) range.
-    pub full_range: bool,
-    /// BT.601 matrix rather than BT.709.
-    pub bt601: bool,
+    nv12: bool,
 }
 
 impl Renderer {
@@ -246,6 +239,22 @@ impl Renderer {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        let dummy = device
+            .create_texture(&wgpu::TextureDescriptor {
+                label: Some("video dummy"),
+                size: wgpu::Extent3d {
+                    width: 1,
+                    height: 1,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::R8Unorm,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            })
+            .create_view(&wgpu::TextureViewDescriptor::default());
         Ok(Self {
             surface,
             device,
@@ -255,6 +264,8 @@ impl Renderer {
             layout,
             sampler,
             params,
+            dummy,
+            bad_frame_logged: false,
             video: None,
         })
     }
@@ -269,45 +280,65 @@ impl Renderer {
         self.surface.configure(&self.device, &self.config);
     }
 
-    /// Uploads one frame; the next `render` draws it.
+    /// Uploads one frame; the next `render` draws it. A frame whose strides or plane lengths do
+    /// not fit its size is logged once and skipped.
     pub fn upload(&mut self, f: &YuvFrame<'_>) {
-        let (cw, ch) = (f.width.div_ceil(2), f.height.div_ceil(2));
-        let same = matches!(&self.video, Some(p) if p.width == f.width && p.height == f.height);
+        let copies = match plane_copies(f) {
+            Ok(c) => c,
+            Err(e) => {
+                if !self.bad_frame_logged {
+                    log::warn!("video frame skipped: {e}");
+                    self.bad_frame_logged = true;
+                }
+                return;
+            }
+        };
+        self.bad_frame_logged = false;
+        let nv12 = matches!(f.chroma, Chroma::Nv12 { .. });
+        let same = matches!(
+            &self.video,
+            Some(p) if p.width == f.width && p.height == f.height && p.nv12 == nv12
+        );
         if !same {
-            let plane = |w: u32, h: u32| {
+            let plane = |c: &PlaneCopy<'_>| {
                 self.device.create_texture(&wgpu::TextureDescriptor {
                     label: Some("video plane"),
                     size: wgpu::Extent3d {
-                        width: w,
-                        height: h,
+                        width: c.width,
+                        height: c.height,
                         depth_or_array_layers: 1,
                     },
                     mip_level_count: 1,
                     sample_count: 1,
                     dimension: wgpu::TextureDimension::D2,
-                    format: wgpu::TextureFormat::R8Unorm,
+                    format: c.format,
                     usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
                     view_formats: &[],
                 })
             };
-            let (y, u, v) = (plane(f.width, f.height), plane(cw, ch), plane(cw, ch));
-            let views =
-                [&y, &u, &v].map(|t| t.create_view(&wgpu::TextureViewDescriptor::default()));
+            let y = plane(&copies[0]);
+            let c0 = plane(&copies[1]);
+            let c1 = copies.get(2).map(plane);
+            let view = |t: &wgpu::Texture| t.create_view(&wgpu::TextureViewDescriptor::default());
+            let (y_view, c0_view) = (view(&y), view(&c0));
+            let c1_view = c1.as_ref().map(view);
             let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("video"),
                 layout: &self.layout,
                 entries: &[
                     wgpu::BindGroupEntry {
                         binding: 0,
-                        resource: wgpu::BindingResource::TextureView(&views[0]),
+                        resource: wgpu::BindingResource::TextureView(&y_view),
                     },
                     wgpu::BindGroupEntry {
                         binding: 1,
-                        resource: wgpu::BindingResource::TextureView(&views[1]),
+                        resource: wgpu::BindingResource::TextureView(&c0_view),
                     },
                     wgpu::BindGroupEntry {
                         binding: 2,
-                        resource: wgpu::BindingResource::TextureView(&views[2]),
+                        resource: wgpu::BindingResource::TextureView(
+                            c1_view.as_ref().unwrap_or(&self.dummy),
+                        ),
                     },
                     wgpu::BindGroupEntry {
                         binding: 3,
@@ -321,15 +352,16 @@ impl Renderer {
             });
             self.video = Some(Planes {
                 y,
-                u,
-                v,
+                c0,
+                c1,
                 bind,
                 width: f.width,
                 height: f.height,
+                nv12,
             });
         }
         let planes = self.video.as_ref().expect("planes were just made");
-        let write = |texture: &wgpu::Texture, data: &[u8], stride: u32, w: u32, h: u32| {
+        let write = |texture: &wgpu::Texture, copy: &PlaneCopy<'_>| {
             self.queue.write_texture(
                 wgpu::TexelCopyTextureInfo {
                     texture,
@@ -337,23 +369,25 @@ impl Renderer {
                     origin: wgpu::Origin3d::ZERO,
                     aspect: wgpu::TextureAspect::All,
                 },
-                data,
+                copy.data,
                 wgpu::TexelCopyBufferLayout {
                     offset: 0,
-                    bytes_per_row: Some(stride),
-                    rows_per_image: Some(h),
+                    bytes_per_row: Some(copy.stride),
+                    rows_per_image: Some(copy.height),
                 },
                 wgpu::Extent3d {
-                    width: w,
-                    height: h,
+                    width: copy.width,
+                    height: copy.height,
                     depth_or_array_layers: 1,
                 },
             );
         };
-        write(&planes.y, f.y, f.y_stride, f.width, f.height);
-        write(&planes.u, f.u, f.u_stride, cw, ch);
-        write(&planes.v, f.v, f.v_stride, cw, ch);
-        let words: [u32; 4] = [f.full_range as u32, f.bt601 as u32, 0, 0];
+        write(&planes.y, &copies[0]);
+        write(&planes.c0, &copies[1]);
+        if let (Some(t), Some(c)) = (&planes.c1, copies.get(2)) {
+            write(t, c);
+        }
+        let words: [u32; 4] = [f.full_range as u32, f.bt601 as u32, nv12 as u32, 0];
         let mut bytes = [0u8; 16];
         for (i, w) in words.iter().enumerate() {
             bytes[i * 4..i * 4 + 4].copy_from_slice(&w.to_le_bytes());

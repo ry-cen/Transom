@@ -1,6 +1,6 @@
 [package]
 name = "transom-video"
-description = "HEVC decoding (FFmpeg, software) of the host's length-prefixed access units."
+description = "HEVC decoding (FFmpeg: hardware via VideoToolbox, D3D11VA or VAAPI with a software fallback) of the host's length-prefixed access units."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
