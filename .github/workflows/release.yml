@@ -1,0 +1,86 @@
+name: Release
+
+# Builds a portable Windows zip (Transom plus FFmpeg's LGPL DLLs) and attaches it to a GitHub
+# Release. Push a tag like v0.1.0, or run it by hand to get the zip as a workflow artifact only.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  FFMPEG_NAME: ffmpeg-n9.0-latest-win64-lgpl-shared-9.0
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release
+      - name: Install FFmpeg
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/$env:FFMPEG_NAME.zip" -OutFile "$env:RUNNER_TEMP\ffmpeg.zip"
+          Expand-Archive "$env:RUNNER_TEMP\ffmpeg.zip" -DestinationPath "$env:RUNNER_TEMP"
+          $dir = Join-Path $env:RUNNER_TEMP $env:FFMPEG_NAME
+          "FFMPEG_DIR=$dir" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "LIBCLANG_PATH=C:\Program Files\LLVM\bin" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          (Join-Path $dir "bin") | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+      # The static C runtime means the zip runs without the Visual C++ Redistributable.
+      - name: Build
+        env:
+          RUSTFLAGS: -C target-feature=+crt-static
+        run: cargo build --locked --release -p transom --bins
+      - name: Package
+        shell: pwsh
+        run: |
+          $ver = if ($env:GITHUB_REF_TYPE -eq "tag") { $env:GITHUB_REF_NAME } else { "dev-$($env:GITHUB_SHA.Substring(0,7))" }
+          $name = "transom-$ver-windows-x64"
+          $out = Join-Path $env:RUNNER_TEMP $name
+          New-Item -ItemType Directory -Path $out, "$out\licenses" | Out-Null
+          Copy-Item target\release\transom.exe, target\release\transom-gui.exe $out
+          Copy-Item "$env:FFMPEG_DIR\bin\*.dll" $out
+          Copy-Item README.md, LICENSE, NOTICE $out
+          Copy-Item "$env:FFMPEG_DIR\LICENSE.txt" "$out\licenses\FFmpeg-LICENSE.txt"
+          @"
+          Transom for Windows
+          ===================
+
+          Unzip anywhere and double-click transom-gui.exe. Keep the DLLs next to it.
+          transom.exe is the command-line version (run it from a terminal).
+
+          Windows may warn that the app is from an unknown publisher, because it is not
+          code-signed. Choose "More info", then "Run anyway".
+
+          This package includes FFmpeg ($env:FFMPEG_NAME, https://ffmpeg.org), licensed under
+          the GNU LGPL version 2.1 or later; see licenses\FFmpeg-LICENSE.txt. FFmpeg's source
+          is available from https://github.com/BtbN/FFmpeg-Builds and https://ffmpeg.org.
+          "@ | Set-Content "$out\READ ME FIRST.txt"
+          Compress-Archive -Path $out -DestinationPath "$name.zip"
+          "ZIP=$name.zip" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      - name: Smoke test
+        shell: pwsh
+        run: |
+          Expand-Archive $env:ZIP -DestinationPath smoke
+          $dir = Get-ChildItem smoke | Select-Object -First 1
+          # A clean PATH proves the bundled DLLs are the ones loaded.
+          $env:PATH = "C:\Windows\System32;C:\Windows"
+          & "$($dir.FullName)\transom.exe" --version
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: transom-windows-x64
+          path: ${{ env.ZIP }}
+          if-no-files-found: error
+      - name: Publish release
+        if: github.ref_type == 'tag'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create $env:GITHUB_REF_NAME $env:ZIP --title "Transom $env:GITHUB_REF_NAME" --generate-notes

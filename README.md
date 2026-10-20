@@ -20,7 +20,17 @@ Version 0.1. What works:
 Not yet: the clipboard, the Mac's menus, trackpad gestures, Sill's settings, audio, pairing over
 the USB cable, and Direct Wireless.
 
-## Install
+## Download
+
+**Windows:** download `transom-…-windows-x64.zip` from the
+[latest release](https://github.com/ry-cen/Transom/releases/latest), unzip it anywhere and
+double-click `transom-gui.exe`. FFmpeg is included; keep its DLLs next to the program. The
+program is not code-signed, so Windows SmartScreen may warn about an unknown publisher: choose
+**More info**, then **Run anyway**.
+
+Linux and macOS: build from source (below) for now.
+
+## Build from source
 
 Transom needs FFmpeg's shared libraries (libavcodec, libavformat, libavutil, libswscale) at
 build time and at run time.
