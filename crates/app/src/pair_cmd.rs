@@ -1,17 +1,17 @@
 //! `transom pair`.
 
 use crate::cli::TargetArgs;
+use crate::pairflow::{self, LinkPairError};
 use crate::target::{match_instance, BROWSE_TIME};
 use crate::text::{net_error, pair_refusal};
 use anyhow::{anyhow, bail, Result};
 use std::io::{BufRead, Write};
 use std::net::SocketAddr;
-use std::time::Duration;
 use tokio::runtime::Runtime;
-use transom_net::dial::{resolve, HOME_DIAL_TIMEOUT, REMOTE_DEFAULT_PORT, REMOTE_DIAL_TIMEOUT};
+use transom_net::dial::{resolve, REMOTE_DEFAULT_PORT};
 use transom_net::discovery::{browse, FoundMac};
 use transom_net::identity::DeviceIdentity;
-use transom_net::pairing::{ask, cancel, pair_with_code, pair_with_link, PairTarget, Paired};
+use transom_net::pairing::Paired;
 use transom_net::store::Store;
 use transom_net::tls::PinPolicy;
 use transom_net::NetError;
@@ -27,14 +27,6 @@ pub struct PairArgs<'a> {
 
 fn is_tls(f: &FoundMac) -> bool {
     matches!(f.door, HomeDoor::PairingRequired | HomeDoor::Open)
-}
-
-fn per_attempt(remote: bool) -> Duration {
-    if remote {
-        REMOTE_DIAL_TIMEOUT
-    } else {
-        HOME_DIAL_TIMEOUT
-    }
 }
 
 fn other<E: std::fmt::Display>(e: E) -> anyhow::Error {
@@ -100,42 +92,22 @@ fn pair_by_link(
 ) -> Result<i32> {
     let link =
         PairLink::parse(url).map_err(|e| anyhow!("that pairing link is not valid: {e:?}"))?;
-    let mut candidates: Vec<Vec<SocketAddr>> = Vec::new();
-    if let Some(addrs) = explicit_addrs(t, rt)? {
-        candidates.push(addrs);
-    } else {
-        for f in browse(BROWSE_TIME)
-            .map_err(other)?
-            .iter()
-            .filter(|f| is_tls(f))
-        {
-            candidates.push(f.addresses.clone());
+    let candidates = rt
+        .block_on(pairflow::link_candidates(&link, explicit_addrs(t, rt)?))
+        .map_err(other)?;
+    match rt.block_on(pairflow::pair_link(
+        id,
+        &link,
+        candidates,
+        pairflow::per_attempt(t.remote),
+        name,
+    )) {
+        Ok(paired) => finish(store, &paired),
+        Err(LinkPairError::Refused(e)) => bail!("{}", print_failure(&e)),
+        Err(LinkPairError::Exhausted(Some(e))) => {
+            bail!("could not pair using the link: {}", print_failure(&e))
         }
-        for a in &link.addresses {
-            let port = a.port.unwrap_or(link.port);
-            match rt.block_on(resolve(&a.host, port)) {
-                Ok(addrs) => candidates.push(addrs),
-                Err(e) => log::debug!("{}: {e}", a.host),
-            }
-        }
-    }
-    let attempt = per_attempt(t.remote);
-    let mut last: Option<NetError> = None;
-    for addrs in candidates {
-        match rt.block_on(pair_with_link(id, &link, addrs, attempt, name)) {
-            Ok(paired) => return finish(store, &paired),
-            Err(
-                e @ (NetError::PinMismatch
-                | NetError::Connect(_)
-                | NetError::Timeout
-                | NetError::Closed),
-            ) => last = Some(e),
-            Err(e) => bail!("{}", print_failure(&e)),
-        }
-    }
-    match last {
-        Some(e) => bail!("could not pair using the link: {}", print_failure(&e)),
-        None => bail!("could not find the Mac from the link"),
+        Err(LinkPairError::Exhausted(None)) => bail!("could not find the Mac from the link"),
     }
 }
 
@@ -152,12 +124,15 @@ fn pair_by_code(
         Err(CodeProblem::Length) => bail!("A code has 12 digits."),
         Err(CodeProblem::Typo) => bail!("That code has a typo. Check it against your Mac."),
     };
-    let target = PairTarget {
-        addrs: single_target(t, rt)?,
-        pin: PinPolicy::AnyKey,
-        per_attempt: per_attempt(t.remote),
-    };
-    match rt.block_on(pair_with_code(id, &target, &code, name)) {
+    let addrs = single_target(t, rt)?;
+    match rt.block_on(pairflow::pair_code(
+        id,
+        addrs,
+        PinPolicy::AnyKey,
+        pairflow::per_attempt(t.remote),
+        &code,
+        name,
+    )) {
         Ok(paired) => finish(store, &paired),
         Err(e) => bail!("{}", print_failure(&e)),
     }
@@ -191,17 +166,12 @@ fn pair_interactive(
     rt: &Runtime,
 ) -> Result<i32> {
     let addrs = single_target(t, rt)?;
-    let attempt = per_attempt(t.remote);
+    let attempt = pairflow::per_attempt(t.remote);
     let mut pin = PinPolicy::AnyKey;
     let mut shown = false;
     if !t.remote {
-        let target = PairTarget {
-            addrs: addrs.clone(),
-            pin: PinPolicy::AnyKey,
-            per_attempt: attempt,
-        };
         let (result, fp) = rt
-            .block_on(ask(id, &target, name))
+            .block_on(pairflow::ask(id, addrs.clone(), attempt, name))
             .map_err(|e| anyhow!("{}", print_failure(&e)))?;
         if result.ok {
             println!("unexpected answer");
@@ -224,18 +194,13 @@ fn pair_interactive(
         }
         pin = PinPolicy::Pinned(fp);
     }
-    let target = PairTarget {
-        addrs,
-        pin,
-        per_attempt: attempt,
-    };
     loop {
         print!("Code (12 digits): ");
         let _ = std::io::stdout().flush();
         let line = read_line().unwrap_or_default();
         if line.is_empty() {
             if shown {
-                let _ = rt.block_on(cancel(id, &target, name));
+                rt.block_on(pairflow::cancel(id, addrs.clone(), pin, attempt, name));
             }
             println!("cancelled");
             return Ok(1);
@@ -251,7 +216,14 @@ fn pair_interactive(
                 continue;
             }
         };
-        match rt.block_on(pair_with_code(id, &target, &code, name)) {
+        match rt.block_on(pairflow::pair_code(
+            id,
+            addrs.clone(),
+            pin,
+            attempt,
+            &code,
+            name,
+        )) {
             Ok(paired) => return finish(store, &paired),
             Err(e)
                 if matches!(

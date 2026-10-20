@@ -20,12 +20,13 @@ use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, Notify};
 use transom_proto::blobs::CursorShape;
+use transom_proto::host_settings::{HostSettingsChange, HostSettingsState};
 use transom_proto::identity::{
     b64url_decode, b64url_encode, fingerprint_of_certificate, fingerprint_of_spki, mac_id,
 };
 use transom_proto::messages::{
-    from_json, to_json, ClientStats, Goodbye, Hello, InputEvent, PairRequest, PairResult,
-    StreamSource, Viewport, WindowInfo, WindowList,
+    from_json, to_json, AppInfo, ClientStats, Goodbye, Hello, InputEvent, LaunchApp, PairRequest,
+    PairResult, StreamSource, Viewport, WindowCommand, WindowInfo, WindowList,
 };
 use transom_proto::pairing::{code_key, mac_proof, recognition_tag, verify_device_proof};
 use transom_proto::params::ParameterSets;
@@ -65,6 +66,16 @@ pub struct MockConfig {
     /// Send the first WindowList right after the handshake, before reading the client's hello,
     /// and no second one after it.
     pub host_speaks_first: bool,
+    /// Kind 3 pictures sent after the first window list: (window id, JPEG).
+    pub thumbnails: Vec<(u32, Vec<u8>)>,
+    /// Kind 4 icons sent after the first window list: (bundle id, PNG).
+    pub icons: Vec<(String, Vec<u8>)>,
+    /// Kind 5, sent after the first window list when not empty.
+    pub apps: Vec<AppInfo>,
+    /// Kind 16 sent after the thumbnails; also the state kind 17 changes are laid over.
+    pub host_settings: Option<HostSettingsState>,
+    /// Where to listen; default 127.0.0.1:0. mockhost --bonjour uses 0.0.0.0:0.
+    pub listen: SocketAddr,
 }
 
 impl Default for MockConfig {
@@ -94,6 +105,11 @@ impl Default for MockConfig {
             count_rejected_bytes: false,
             handshake_delay: None,
             host_speaks_first: false,
+            thumbnails: Vec::new(),
+            icons: Vec::new(),
+            apps: Vec::new(),
+            host_settings: None,
+            listen: SocketAddr::from(([127, 0, 0, 1], 0)),
         }
     }
 }
@@ -108,6 +124,10 @@ pub enum MockEvent {
     Stats(ClientStats),
     Ping,
     Pair(PairRequest),
+    ChangeSettings(HostSettingsChange),
+    /// Kind 7: the bundle id to launch.
+    Launch(String),
+    WindowCommand(WindowCommand),
     Unknown(u8),
     /// Total bytes (ClientHello included) a client sent on a connection whose TLS handshake
     /// failed; only with `MockConfig::count_rejected_bytes`.
@@ -178,7 +198,7 @@ impl MockHost {
             SESSION_ALPN,
         )?;
 
-        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let listener = TcpListener::bind(cfg.listen).await?;
         let addr = listener.local_addr()?;
         let (events_tx, events) = crossbeam_channel::unbounded();
         let shared = Arc::new(Shared {
@@ -638,6 +658,27 @@ async fn session_inner(io: BoxIo, shared: &Arc<Shared>) {
     if let Some(c) = &shared.cfg.cursor {
         send(kind::CURSOR_SHAPE, &c.encode());
     }
+    if !shared.cfg.apps.is_empty() {
+        send(kind::APP_LIST, &to_json(&shared.cfg.apps));
+    }
+    for (bundle_id, png) in &shared.cfg.icons {
+        let mut p = u16::try_from(bundle_id.len())
+            .unwrap_or(u16::MAX)
+            .to_be_bytes()
+            .to_vec();
+        p.extend_from_slice(bundle_id.as_bytes());
+        p.extend_from_slice(png);
+        send(kind::APP_ICON, &p);
+    }
+    for (id, jpeg) in &shared.cfg.thumbnails {
+        let mut p = id.to_be_bytes().to_vec();
+        p.extend_from_slice(jpeg);
+        send(kind::THUMBNAIL, &p);
+    }
+    let mut settings = shared.cfg.host_settings.clone();
+    if let Some(s) = &settings {
+        send(kind::HOST_SETTINGS, &to_json(s));
+    }
 
     let closing = Arc::new(Notify::new());
     let mut video_running = false;
@@ -744,6 +785,28 @@ async fn session_inner(io: BoxIo, shared: &Arc<Shared>) {
             kind::CLIENT_STATS => {
                 if let Some(s) = from_json::<ClientStats>(&payload) {
                     shared.emit(MockEvent::Stats(s));
+                }
+            }
+            kind::CHANGE_SETTINGS => {
+                let Some(c) = from_json::<HostSettingsChange>(&payload) else {
+                    continue;
+                };
+                shared.emit(MockEvent::ChangeSettings(c.clone()));
+                if let Some(s) = settings.as_mut() {
+                    s.settings = c.applied_to(&s.settings);
+                    s.answering = c.token;
+                    send(kind::HOST_SETTINGS, &to_json(&*s));
+                    s.answering = None;
+                }
+            }
+            kind::LAUNCH_APP => {
+                if let Some(l) = from_json::<LaunchApp>(&payload) {
+                    shared.emit(MockEvent::Launch(l.bundle_id));
+                }
+            }
+            kind::WINDOW_COMMAND => {
+                if let Some(c) = from_json::<WindowCommand>(&payload) {
+                    shared.emit(MockEvent::WindowCommand(c));
                 }
             }
             other => shared.emit(MockEvent::Unknown(other)),

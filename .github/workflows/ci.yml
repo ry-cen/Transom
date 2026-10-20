@@ -83,4 +83,6 @@ jobs:
           path: |
             target/release/transom
             target/release/transom.exe
+            target/release/transom-gui
+            target/release/transom-gui.exe
           if-no-files-found: error

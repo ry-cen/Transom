@@ -230,3 +230,18 @@ fn pixel_gesture_phases() {
         ]
     );
 }
+
+#[test]
+fn buttons_held_tracks_down_up_and_release_all() {
+    let mut p = mapper();
+    p.moved(200.0, 50.0);
+    assert!(!p.buttons_held());
+    p.button(MouseButton::Right, true);
+    assert!(p.buttons_held());
+    p.button(MouseButton::Right, false);
+    assert!(!p.buttons_held());
+    p.button(MouseButton::Left, true);
+    assert!(p.buttons_held());
+    p.release_all();
+    assert!(!p.buttons_held());
+}

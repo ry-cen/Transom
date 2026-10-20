@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- PLACEHOLDER icon for Transom: a window with a transom bar above it. Not final artwork; it
+     will be replaced by an owner-approved design. Same geometry as the PNGs beside it. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <title>Transom (placeholder icon)</title>
+  <rect x="16" y="16" width="480" height="480" rx="96" fill="#23262C"/>
+  <rect x="104" y="96" width="304" height="56" rx="14" fill="#9BB7FF"/>
+  <rect x="104" y="184" width="304" height="240" rx="18" fill="#EEF0F3"/>
+  <rect x="128" y="208" width="116" height="192" rx="6" fill="#2C3550"/>
+  <rect x="268" y="208" width="116" height="192" rx="6" fill="#2C3550"/>
+</svg>

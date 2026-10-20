@@ -3,13 +3,15 @@
 //!
 //! Modules: `geometry` and `video` (frozen, from wave 0), plus `wire` (framing), `params`
 //! (parameter sets), `messages` (JSON payloads), `blobs` (binary payloads), `identity`,
-//! `pairing`, `pairlink`, `address`, `version`, `safetext`, `compat` and `goodbye`.
+//! `pairing`, `pairlink`, `address`, `version`, `safetext`, `compat`, `goodbye` and
+//! `host_settings` (kinds 16 and 17).
 
 pub mod address;
 pub mod blobs;
 pub mod compat;
 pub mod geometry;
 pub mod goodbye;
+pub mod host_settings;
 pub mod identity;
 pub mod messages;
 pub mod pairing;

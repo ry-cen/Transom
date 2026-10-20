@@ -6,15 +6,35 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[lib]
+name = "transom_app"
+path = "src/lib.rs"
+
 [[bin]]
 name = "transom"
 path = "src/main.rs"
 
+# The graphical app with no console window on Windows (docs/ui-spec.md section 8.1).
+[[bin]]
+name = "transom-gui"
+path = "src/bin/transom-gui.rs"
+required-features = ["gui"]
+
 [features]
-default = ["video"]
+default = ["video", "gui"]
 # The viewer window (`transom connect`). Without it the CLI still discovers, pairs and lists
 # windows, and builds on a machine without FFmpeg's development files.
 video = ["dep:transom-video"]
+# The graphical app. Implies the viewer.
+gui = [
+    "video",
+    "dep:egui",
+    "dep:egui-winit",
+    "dep:egui-wgpu",
+    "dep:image",
+    "dep:serde",
+    "dep:serde_json",
+]
 
 [dependencies]
 transom-proto.workspace = true
@@ -29,3 +49,13 @@ clap.workspace = true
 anyhow.workspace = true
 log.workspace = true
 env_logger.workspace = true
+egui = { workspace = true, optional = true }
+egui-winit = { workspace = true, optional = true }
+egui-wgpu = { workspace = true, optional = true }
+image = { workspace = true, optional = true }
+serde = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+
+[dev-dependencies]
+egui_kittest.workspace = true
+transom-net = { workspace = true, features = ["mock"] }

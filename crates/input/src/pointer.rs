@@ -58,6 +58,11 @@ impl PointerMapper {
         self.raw().is_some_and(is_inside)
     }
 
+    /// A button went down on the Mac and has not come up yet.
+    pub fn buttons_held(&self) -> bool {
+        self.left || self.right
+    }
+
     /// CursorMoved, physical px. Some(Pointer Move) when inside, or when a button is held
     /// (fraction clamped to 0..=1).
     pub fn moved(&mut self, x: f64, y: f64) -> Option<InputEvent> {

@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=Transom
+GenericName=Mac Viewer
+Comment=View and control a Mac running Sill
+Exec=transom-gui %u
+Icon=transom
+Terminal=false
+Type=Application
+Categories=Network;RemoteAccess;
+StartupWMClass=transom

@@ -14,6 +14,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 use transom_proto::blobs::CursorShape;
+use transom_proto::host_settings::{HostSettingsChange, HostSettingsState};
 use transom_proto::messages::{
     decode_goodbye, from_json, to_json, AppInfo, ClientStats, Goodbye, Hello, InputEvent, MacInfo,
     PointerAction, SignedMacInfo, StreamSource, Viewport, WindowCommand, WindowList,
@@ -54,6 +55,18 @@ pub enum SessionEvent {
     },
     WindowList(WindowList),
     AppList(Vec<AppInfo>),
+    /// Kind 3 (blobs::decode_thumbnail): a window's picture, JPEG bytes not yet decoded.
+    Thumbnail {
+        id: u32,
+        jpeg: Vec<u8>,
+    },
+    /// Kind 4 (blobs::decode_icon): an app's icon, PNG bytes not yet decoded.
+    AppIcon {
+        bundle_id: String,
+        png: Vec<u8>,
+    },
+    /// Kind 16: the Mac's settings, on connect, on change, and as the answer to a change.
+    HostSettings(HostSettingsState),
     CursorShape(CursorShape),
     MacInfo {
         info: MacInfo,
@@ -63,13 +76,47 @@ pub enum SessionEvent {
         rtt_ms: Option<f64>,
         fps: u32,
     },
+    /// The session ended and the supervisor retries after `retry_in`. `text` is the CLI's line.
     Ended {
         text: String,
         retry_in: Option<Duration>,
+        kind: EndKind,
     },
+    /// The supervisor stopped for good. `text` is the CLI's line.
     Finished {
         text: String,
+        kind: EndKind,
     },
+}
+
+/// Why a session ended, for a UI that words it itself (docs/ui-spec.md section 5.8).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum EndKind {
+    /// Before admission: not found on the network, dial or TLS failed.
+    ConnectFailed,
+    /// An admitted session dropped without a goodbye.
+    Lost,
+    /// The Mac's goodbye. `reason` is the raw string (`goodbye_reason::*` or anything else).
+    Goodbye {
+        reason: String,
+        message: Option<String>,
+        minimum_version: Option<String>,
+    },
+    /// The Mac does not know this computer's key.
+    NotPaired,
+    /// The Mac presented a different key from the one pinned.
+    PinMismatch,
+}
+
+impl EndKind {
+    /// The kind for the Mac's goodbye.
+    pub fn from_goodbye(g: &Goodbye) -> EndKind {
+        EndKind::Goodbye {
+            reason: g.reason.clone(),
+            message: g.message.clone(),
+            minimum_version: g.minimum_version.clone(),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -79,6 +126,10 @@ pub enum SessionCommand {
     Input(InputEvent),
     LaunchApp(String),
     WindowCommand(WindowCommand),
+    /// Kind 17. Dropped (not queued) while no session runs.
+    ChangeSettings(HostSettingsChange),
+    /// Ends a reconnect backoff wait now; ignored at any other time.
+    RetryNow,
     Close,
 }
 
@@ -258,6 +309,9 @@ async fn reader_task<R: AsyncRead + Unpin>(
             }
             kind::WINDOW_LIST
             | kind::APP_LIST
+            | kind::THUMBNAIL
+            | kind::APP_ICON
+            | kind::HOST_SETTINGS
             | kind::PONG
             | kind::CURSOR_SHAPE
             | kind::MAC_INFO
@@ -468,6 +522,31 @@ pub async fn run_session(
                                 out.emit(SessionEvent::AppList(apps));
                             }
                         }
+                        kind::THUMBNAIL => {
+                            if let Some((id, jpeg)) = transom_proto::blobs::decode_thumbnail(&payload) {
+                                out.emit(SessionEvent::Thumbnail { id, jpeg: jpeg.to_vec() });
+                            } else {
+                                log::debug!("bad thumbnail");
+                            }
+                        }
+                        kind::APP_ICON => {
+                            if let Some((bundle_id, png)) = transom_proto::blobs::decode_icon(&payload) {
+                                if transom_proto::safetext::label(&bundle_id, 255) == bundle_id {
+                                    out.emit(SessionEvent::AppIcon { bundle_id, png: png.to_vec() });
+                                } else {
+                                    log::debug!("app icon with an unsafe bundle id skipped");
+                                }
+                            } else {
+                                log::debug!("bad app icon");
+                            }
+                        }
+                        kind::HOST_SETTINGS => {
+                            if let Some(state) = from_json::<HostSettingsState>(&payload) {
+                                out.emit(SessionEvent::HostSettings(state));
+                            } else {
+                                log::debug!("bad host settings");
+                            }
+                        }
                         kind::PONG => {
                             if let Some(bytes) = payload.get(..8) {
                                 let mut b = [0u8; 8];
@@ -545,6 +624,9 @@ pub async fn run_session(
                         );
                     }
                     SessionCommand::WindowCommand(c) => send(kind::WINDOW_COMMAND, &to_json(&c)),
+                    SessionCommand::ChangeSettings(c) => send(kind::CHANGE_SETTINGS, &to_json(&c)),
+                    // Only meaningful while idle (supervisor).
+                    SessionCommand::RetryNow => {}
                     SessionCommand::Close => {
                         drain_writer(&mut writer, &wtx).await;
                         return SessionEnd::UserClosed;

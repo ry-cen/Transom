@@ -55,8 +55,16 @@ ffmpeg-next = { version = "9.0.0", default-features = false, features = ["codec"
 winit = "0.30.13"
 wgpu = "30.0.1"
 pollster = "1.0.1"
-image = { version = "0.25.10", default-features = false, features = ["png"] }
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg"] }
 clap = { version = "4.6.7", features = ["derive"] }
+
+# The graphical app (`transom-gui`, and `transom` with no subcommand). egui has no default
+# features: `default_fonts` is required or no text renders. 0.36.2 is the fallback (same wgpu and
+# winit requirements); never mix the two.
+egui = { version = "0.37.0", default-features = false, features = ["default_fonts"] }
+egui-winit = { version = "0.37.0", default-features = false, features = ["accesskit", "clipboard", "links", "wayland", "x11"] }
+egui-wgpu = { version = "0.37.0", default-features = false, features = ["winit", "wayland", "x11"] }
+egui_kittest = "0.37.0"
 
 # Dependencies optimised in debug builds too: PBKDF2's 600,000 rounds (about 0.7 s instead of
 # many seconds, inside the host's 10 s pairing deadline) and software HEVC decoding.

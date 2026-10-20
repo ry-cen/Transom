@@ -6,6 +6,8 @@ use crate::NetError;
 use mdns_sd::{ScopedIp, ServiceDaemon, ServiceEvent};
 use std::collections::HashMap;
 use std::net::{SocketAddr, SocketAddrV6};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use transom_proto::pairing::{home_door, tag_matches, HomeDoor};
 
@@ -121,6 +123,96 @@ pub fn browse_until(
         }
     })?;
     Ok(hit)
+}
+
+/// One change seen by a live browse (`watch`).
+#[derive(Clone, Debug)]
+pub enum BrowseEvent {
+    /// A Mac resolved, or resolved again (same `fullname`: replace the earlier entry).
+    Found(FoundMac),
+    /// The Mac with this `fullname` left the network.
+    Removed { fullname: String },
+}
+
+/// A live browse of `_sill._tcp`, for the app's lifetime. Stopping it (or dropping it) shuts its
+/// mDNS daemon down and joins its reader thread.
+pub struct Watch {
+    daemon: Option<ServiceDaemon>,
+    thread: Option<std::thread::JoinHandle<()>>,
+    stop: Arc<AtomicBool>,
+}
+
+/// Browses `_sill._tcp` until stopped. Every resolution is sent as `Found` and every removal as
+/// `Removed`, each followed by `wake()`.
+pub fn watch(
+    out: crossbeam_channel::Sender<BrowseEvent>,
+    wake: Arc<dyn Fn() + Send + Sync>,
+) -> Result<Watch, NetError> {
+    let daemon = ServiceDaemon::new().map_err(|e| NetError::Connect(format!("mDNS: {e}")))?;
+    let rx = match daemon.browse(SERVICE) {
+        Ok(rx) => rx,
+        Err(e) => {
+            let _ = daemon.shutdown();
+            return Err(NetError::Connect(format!("mDNS: {e}")));
+        }
+    };
+    let stop = Arc::new(AtomicBool::new(false));
+    let flag = stop.clone();
+    let thread = std::thread::Builder::new()
+        .name("transom-watch".into())
+        .spawn(move || loop {
+            if flag.load(Ordering::Relaxed) {
+                break;
+            }
+            let event = match rx.recv_timeout(Duration::from_millis(250)) {
+                Ok(ServiceEvent::ServiceResolved(info)) => BrowseEvent::Found(to_found(&info)),
+                Ok(ServiceEvent::ServiceRemoved(_ty, fullname)) => {
+                    BrowseEvent::Removed { fullname }
+                }
+                Ok(_) => continue,
+                Err(mdns_sd::RecvTimeoutError::Timeout) => continue,
+                Err(_) => break,
+            };
+            if out.send(event).is_err() {
+                break;
+            }
+            wake();
+        });
+    let thread = match thread {
+        Ok(t) => t,
+        Err(e) => {
+            let _ = daemon.shutdown();
+            return Err(NetError::Connect(format!("mDNS: {e}")));
+        }
+    };
+    Ok(Watch {
+        daemon: Some(daemon),
+        thread: Some(thread),
+        stop,
+    })
+}
+
+impl Watch {
+    /// Shuts the daemon down and joins the reader thread.
+    pub fn stop(mut self) {
+        self.shut_down();
+    }
+
+    fn shut_down(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(daemon) = self.daemon.take() {
+            let _ = daemon.shutdown();
+        }
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+impl Drop for Watch {
+    fn drop(&mut self) {
+        self.shut_down();
+    }
 }
 
 /// The saved Mac whose recognition key matches `found.tag`.

@@ -29,6 +29,7 @@ thiserror.workspace = true
 [dev-dependencies]
 transom-net = { path = ".", features = ["mock"] }
 env_logger.workspace = true
+image.workspace = true
 
 [[example]]
 name = "mockhost"
