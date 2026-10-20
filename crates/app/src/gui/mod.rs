@@ -3,8 +3,20 @@
 
 pub mod capture;
 pub mod effects;
+pub mod grabstate;
 pub mod images;
 pub mod keyboard;
+#[cfg(all(
+    unix,
+    not(any(
+        target_os = "redox",
+        target_family = "wasm",
+        target_os = "android",
+        target_os = "ios",
+        target_os = "macos"
+    ))
+))]
+pub mod linuxgrab;
 pub mod macs;
 pub mod model;
 pub mod overlay;
@@ -15,6 +27,28 @@ pub mod texts;
 pub mod view;
 #[cfg(windows)]
 pub mod winhook;
+#[cfg(all(
+    unix,
+    not(any(
+        target_os = "redox",
+        target_family = "wasm",
+        target_os = "android",
+        target_os = "ios",
+        target_os = "macos"
+    ))
+))]
+pub mod wlinhibit;
+#[cfg(all(
+    unix,
+    not(any(
+        target_os = "redox",
+        target_family = "wasm",
+        target_os = "android",
+        target_os = "ios",
+        target_os = "macos"
+    ))
+))]
+pub mod x11grab;
 
 use std::path::PathBuf;
 

@@ -4196,8 +4196,11 @@ dependencies = [
  "transom-proto",
  "transom-render",
  "transom-video",
+ "wayland-client",
+ "wayland-protocols",
  "windows-sys 0.52.0",
  "winit",
+ "x11-dl",
 ]
 
 [[package]]
