@@ -1,11 +1,13 @@
 //! The winit `ApplicationHandler` of the graphical app: window, renderer, egui, routing of
 //! keyboard and pointer, redraw (docs/ui-spec.md sections 6 and 8.3). Every message from any
 //! source goes through `App::apply`, so the keyboard mode is recomputed (and held keys are
-//! released on a Mac-to-Transom change) after each model update.
+//! released on a Mac-to-Transom change) after each model update. On Windows, in full screen with
+//! the Mac in charge of the keyboard, the low-level keyboard hook (winhook.rs) takes the keys
+//! Windows keeps for itself and hands them back here as `UserEvent::SysKey`.
 
 use crate::gui::effects::{Effects, Platform};
 use crate::gui::images::ImageCache;
-use crate::gui::keyboard::{keyboard_mode, transition, KeyboardMode, ModeInputs};
+use crate::gui::keyboard::{capture_wanted, keyboard_mode, transition, KeyboardMode, ModeInputs};
 use crate::gui::model::{Effect, IdentityInfo, Model, Msg, Prefs, StreamPanel};
 use crate::gui::overlay::EguiOverlay;
 use crate::gui::texts;
@@ -45,6 +47,9 @@ pub enum UserEvent {
     /// egui wants a frame now.
     Repaint,
     AccessKit(egui_winit::accesskit_winit::Event),
+    /// A key the Windows keyboard hook took from Windows (full screen, Mac mode).
+    #[cfg(windows)]
+    SysKey(crate::gui::capture::SysKey),
 }
 
 impl From<egui_winit::accesskit_winit::Event> for UserEvent {
@@ -102,6 +107,10 @@ struct App {
     gfx: Option<Gfx>,
     mods: ModifiersState,
     mode: KeyboardMode,
+    /// The Windows keyboard hook is taking the OS-reserved keys (`capture_wanted`).
+    capturing: bool,
+    #[cfg(windows)]
+    hook: crate::gui::winhook::Hook,
     focused: bool,
     last_over_ui: bool,
     last_wants_kb: bool,
@@ -131,6 +140,10 @@ pub fn run(
         builder.with_default_menu(false);
     }
     let el = builder.build()?;
+    // Nothing uses raw input (device events), and raw keyboard input may keep the keyboard hook
+    // from being called.
+    #[cfg(windows)]
+    el.listen_device_events(winit::event_loop::DeviceEvents::Never);
     let proxy = el.create_proxy();
     let wake = |make: fn() -> UserEvent| -> crate::stream::Wake {
         let p = proxy.clone();
@@ -164,6 +177,13 @@ pub fn run(
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_with_display_handle(
         Box::new(el.owned_display_handle()),
     ));
+    #[cfg(windows)]
+    let hook = {
+        let p = proxy.clone();
+        crate::gui::winhook::Hook::new(Box::new(move |k: crate::gui::capture::SysKey| {
+            let _ = p.send_event(UserEvent::SysKey(k));
+        }))
+    };
     let mut app = App {
         proxy,
         instance,
@@ -179,6 +199,9 @@ pub fn run(
         gfx: None,
         mods: ModifiersState::empty(),
         mode: KeyboardMode::Transom,
+        capturing: false,
+        #[cfg(windows)]
+        hook,
         focused: false,
         last_over_ui: false,
         last_wants_kb: false,
@@ -215,6 +238,9 @@ fn load_icon() -> Option<Icon> {
 impl App {
     /// Closes the stream (waiting briefly for queued input to flush) and stops discovery.
     fn shutdown(&mut self) {
+        // The hook goes first: this thread blocks in `close` below.
+        #[cfg(windows)]
+        self.hook.stop();
         if let Some(core) = self.effects.stream_mut() {
             core.release_all();
         }
@@ -275,8 +301,9 @@ impl App {
         }
     }
 
-    /// Spec 6.1: recomputed before every key event and after every model update. Everything
-    /// held on the Mac is released at each Mac-to-Transom change.
+    /// Spec 6.1: recomputed before every key event, after every model update and after every
+    /// frame. Everything held on the Mac is released at each Mac-to-Transom change and whenever
+    /// the Windows keyboard hook stops capturing.
     fn recompute_mode(&mut self) {
         let stream = self.model.stream();
         let core = self.effects.stream();
@@ -288,12 +315,51 @@ impl App {
             egui_wants_keyboard: self.last_wants_kb,
         };
         let next = keyboard_mode(&inputs);
-        if transition(self.mode, next) {
+        let capture = capture_wanted(next, self.model.fullscreen, cfg!(windows));
+        let stop_capture = self.capturing && !capture;
+        if capture != self.capturing {
+            self.capturing = capture;
+            #[cfg(windows)]
+            self.set_hook(capture);
+        }
+        // The hook keeps swallowing a captured key until it is released, and drops presses that
+        // arrive after capture stopped, so let go of everything on the Mac now.
+        if transition(self.mode, next) || stop_capture {
             if let Some(core) = self.effects.stream_mut() {
                 core.release_all();
             }
         }
         self.mode = next;
+    }
+
+    /// Starts or stops the keyboard hook's capture.
+    #[cfg(windows)]
+    fn set_hook(&mut self, on: bool) {
+        let hwnd = self
+            .window
+            .as_deref()
+            .and_then(crate::gui::winhook::hwnd_of);
+        match hwnd {
+            Some(h) if on => self.hook.activate(h),
+            _ => self.hook.deactivate(),
+        }
+    }
+
+    /// A key the hook took from Windows. A press counts only while capturing; a release always
+    /// goes through, so nothing stays down on the Mac. Never given to egui.
+    #[cfg(windows)]
+    fn sys_key(&mut self, k: crate::gui::capture::SysKey) {
+        self.recompute_mode();
+        if k.pressed && !self.capturing {
+            return;
+        }
+        let outcome = match self.effects.stream_mut() {
+            Some(core) => core.key(k.code, k.pressed, k.repeat, true),
+            None => return,
+        };
+        if let KeyOutcome::Chord(c) = outcome {
+            self.chord(c);
+        }
     }
 
     /// Pointer events reach the Mac only while connected, away from Transom's own UI (as of the
@@ -477,6 +543,8 @@ impl App {
         for m in out {
             self.apply(m);
         }
+        // Step 6 may have given the keyboard to a text field, or taken it back, with no message.
+        self.recompute_mode();
         // 13.
         let title = match self.model.stream() {
             Some(s) => texts::window_title_streaming(&s.session.mac_name),
@@ -556,6 +624,8 @@ impl ApplicationHandler<UserEvent> for App {
             UserEvent::Net => self.handle_net(el),
             UserEvent::Frame | UserEvent::Repaint => self.request_redraw(),
             UserEvent::Msg => self.handle_msgs(),
+            #[cfg(windows)]
+            UserEvent::SysKey(k) => self.sys_key(k),
             UserEvent::AccessKit(e) => {
                 use egui_winit::accesskit_winit::WindowEvent as Ak;
                 match e.window_event {

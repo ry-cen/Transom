@@ -4196,6 +4196,7 @@ dependencies = [
  "transom-proto",
  "transom-render",
  "transom-video",
+ "windows-sys 0.52.0",
  "winit",
 ]
 

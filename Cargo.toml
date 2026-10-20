@@ -58,6 +58,16 @@ pollster = "1.0.1"
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg"] }
 clap = { version = "4.6.7", features = ["derive"] }
 
+# The Windows keyboard hook (crates/app/src/gui/winhook.rs): the version winit 0.30 already uses,
+# with features winit already turns on, so nothing new is built.
+windows-sys = { version = "0.52.0", features = [
+    "Win32_Foundation",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Threading",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
 # The graphical app (`transom-gui`, and `transom` with no subcommand). egui has no default
 # features: `default_fonts` is required or no text renders. 0.36.2 is the fallback (same wgpu and
 # winit requirements); never mix the two.

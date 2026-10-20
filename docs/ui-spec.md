@@ -714,9 +714,19 @@ These are Transom-mode shortcuts. In Mac mode the same keys go to the Mac as ord
 UI never sees them, so UI zoom does not fire. **Esc while streaming** goes to the Mac in Mac mode
 and closes the top panel in Transom mode.
 
-**Keys the OS keeps** (Alt+Tab, the Win key, Ctrl+Alt+Del, Super on GNOME and KDE) never reach the
-window, so never reach the Mac. With the PC layout, Ctrl acts as Command, so Ctrl+Tab reaches the
-Mac as Cmd+Tab. Phase 3 adds an opt-in Windows keyboard hook.
+**Keys the OS keeps.** On Windows, while the window is full screen and the Mac has the keyboard,
+a low-level keyboard hook takes these keys from Windows and sends them to the Mac: both Win keys,
+alone and in every Win shortcut; Tab, Esc, F4 and Space while Alt is down (Alt+Tab,
+Alt+Shift+Tab, Ctrl+Alt+Tab, Alt+Esc, Alt+F4, Alt+Space); Esc while Ctrl is down (Ctrl+Esc,
+Ctrl+Shift+Esc); and PrintScreen, which has no Mac key and so does nothing. With the PC layout
+Win acts as Control and Alt as Option, so Win+C reaches the Mac as Control+C. Ctrl, Alt and Shift
+are never taken, so the chord still works: chord+F leaves full screen and gives these keys back to
+Windows, and chord+Q disconnects. A key goes on to wherever its press went until it is released.
+Capture stops, and everything held on the Mac is released, when the window leaves full screen or
+loses the focus, a panel or dialog opens, or the session ends. Ctrl+Alt+Del cannot be captured:
+Windows handles it before any app sees it. Win+L may still lock the computer. In a window, and on
+Linux (Super on GNOME and KDE, Alt+Tab) and macOS, these keys stay with the OS and never reach the
+Mac. With the PC layout, Ctrl acts as Command, so Ctrl+Tab reaches the Mac as Cmd+Tab.
 
 ### 6.2 Pointer
 
@@ -790,8 +800,11 @@ Mac as Cmd+Tab. Phase 3 adds an opt-in Windows keyboard hook.
 - High-DPI works without a manifest.
 - Alt+Tab, Win, Win+L and Ctrl+Alt+Del are system keys. AltGr is reported as Ctrl+Alt, so the
   chord requires the **left** Ctrl on Windows.
-- Phase 3: an opt-in "Capture system keys in full screen" preference forwards Win, Alt+Tab and
-  Alt+Esc to the Mac while the window is focused and full screen.
+- In full screen with the Mac in charge of the keyboard, the system keys go to the Mac, except
+  Ctrl+Alt+Del and possibly Win+L (section 6.1). There is no preference: leaving full screen
+  gives them back to Windows. The hook (`WH_KEYBOARD_LL`) runs on its own thread, is installed
+  when capture starts, and is removed once capture has stopped and every key it took has been
+  released. The GUI turns off winit's raw-input device events on Windows; nothing uses them.
 - The FFmpeg DLLs must sit next to `transom-gui.exe` or be on `PATH`; Windows shows its own
   missing-DLL dialog otherwise.
 
@@ -973,13 +986,15 @@ files per OS, loaded at start-up).
 
 Includes: Linux desktop file and icons; Windows `.ico` resource and zip; macOS `.app`; the
 `sill://` URL handler (`transom-gui sill://pair?…` opens Add a Mac with the link and its
-confirmation ADD10, and never pairs without that confirmation); the opt-in Windows system-key
-hook; `crash.log`. All are manual, on each OS.
+confirmation ADD10, and never pairs without that confirmation); the Windows system-key hook in
+full screen; `crash.log`. All are manual, on each OS.
 
 - The launcher shows the icon; the dock or taskbar groups the window under Transom. (manual, per
   OS)
 - Clicking a `sill://pair` link opens the confirmation. (manual, per OS)
-- With the hook on, in full screen, Alt+Tab switches Mac apps. (real Mac, Windows)
+- In full screen, the Win key, Alt+Tab and Alt+F4 reach the Mac (as Control, Option+Tab and
+  Option+F4 with the PC layout) and Windows does nothing with them; chord+F still leaves full
+  screen. (real Mac, Windows)
 
 ### Phase 4: protocol extras
 

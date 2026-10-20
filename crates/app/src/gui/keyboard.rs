@@ -38,6 +38,13 @@ pub fn transition(prev: KeyboardMode, next: KeyboardMode) -> bool {
     prev == KeyboardMode::Mac && next == KeyboardMode::Transom
 }
 
+/// True when the Windows keyboard hook must take the OS-reserved keys (the Win keys, Alt+Tab,
+/// Alt+F4 and the rest; see `capture.rs`) for the Mac: the window is full screen and the Mac has
+/// the keyboard. Never on other systems.
+pub fn capture_wanted(mode: KeyboardMode, fullscreen: bool, on_windows: bool) -> bool {
+    on_windows && fullscreen && mode == KeyboardMode::Mac
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -76,5 +83,14 @@ mod tests {
         assert!(!transition(KeyboardMode::Transom, KeyboardMode::Mac));
         assert!(!transition(KeyboardMode::Mac, KeyboardMode::Mac));
         assert!(!transition(KeyboardMode::Transom, KeyboardMode::Transom));
+    }
+
+    #[test]
+    fn capture_only_in_full_screen_mac_mode_on_windows() {
+        assert!(capture_wanted(KeyboardMode::Mac, true, true));
+        assert!(!capture_wanted(KeyboardMode::Mac, false, true));
+        assert!(!capture_wanted(KeyboardMode::Transom, true, true));
+        assert!(!capture_wanted(KeyboardMode::Mac, true, false));
+        assert!(!capture_wanted(KeyboardMode::Transom, false, false));
     }
 }

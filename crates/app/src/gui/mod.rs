@@ -1,6 +1,7 @@
 //! The graphical app (docs/ui-spec.md). `transom-gui`, and `transom` with no subcommand, call
 //! `run`.
 
+pub mod capture;
 pub mod effects;
 pub mod images;
 pub mod keyboard;
@@ -12,6 +13,8 @@ pub mod prefs;
 pub mod shell;
 pub mod texts;
 pub mod view;
+#[cfg(windows)]
+pub mod winhook;
 
 use std::path::PathBuf;
 
