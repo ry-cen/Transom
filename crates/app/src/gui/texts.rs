@@ -8,6 +8,7 @@
 use crate::gui::model::{PairFailure, RouteDesc, RowWord};
 use transom_net::session::EndKind;
 use transom_proto::address::AddressError;
+use transom_proto::host_settings::LinkReport;
 use transom_proto::messages::goodbye_reason as gr;
 use transom_proto::safetext::{label, LABEL_LIMIT};
 use transom_proto::version::SillVersion;
@@ -427,6 +428,57 @@ pub fn stats_tooltip(rtt_ms: Option<f64>, fps: u32, route: &RouteDesc) -> String
         "Round trip {} ms, {fps} frames per second, {how}",
         rtt_text(rtt_ms)
     )
+}
+
+fn mbps(bits_per_second: i64) -> String {
+    let m = bits_per_second as f64 / 1_000_000.0;
+    if (m - m.round()).abs() < 0.05 {
+        format!("{m:.0} Mbps")
+    } else {
+        format!("{m:.1} Mbps")
+    }
+}
+
+fn scale_name(scale: f64) -> &'static str {
+    if scale >= 2.0 {
+        "Retina"
+    } else {
+        "Standard"
+    }
+}
+
+/// BAR25: the chip shown while the Mac reports the link behind (`LinkReport.isBehind`).
+pub fn link_chip(withheld_per_second: i64) -> String {
+    format!("Network behind · {withheld_per_second} dropped/s")
+}
+
+/// BAR26: the chip's tooltip: what the Mac withholds, what the link carried, and Sill's
+/// suggestion.
+pub fn link_tooltip(link: &LinkReport) -> String {
+    let mut t = format!(
+        "The Mac is dropping {} frames a second: the network to this computer cannot carry {} \
+         per 60 fps.",
+        link.withheld_per_second,
+        mbps(link.bitrate)
+    );
+    if let Some(k) = link.carried_kbps {
+        t.push_str(&format!(" It carried {}.", mbps(k.saturating_mul(1000))));
+    }
+    match (link.suggested_bitrate, link.suggested_capture_scale) {
+        (Some(b), Some(c)) => t.push_str(&format!(
+            " Sill suggests {} at {} resolution.",
+            mbps(b),
+            scale_name(c)
+        )),
+        (Some(b), None) => t.push_str(&format!(" Sill suggests {}.", mbps(b))),
+        (None, Some(c)) => t.push_str(&format!(
+            " Sill suggests {} resolution at the same bitrate.",
+            scale_name(c)
+        )),
+        (None, None) => t.push_str(" Sill has no lower quality to suggest."),
+    }
+    t.push_str(" Change it in Mac settings, or use a wired connection.");
+    t
 }
 
 /// BAR6: the gear's accessible label.
@@ -870,6 +922,29 @@ pub fn end_text(kind: &EndKind, mac: &str, supervisor_text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn link_tooltip_reads_the_report() {
+        let mut l = LinkReport {
+            state: "behind".into(),
+            withheld_per_second: 23,
+            bitrate: 15_000_000,
+            carried_kbps: Some(9_500),
+            suggested_bitrate: Some(8_000_000),
+            suggested_capture_scale: Some(1.0),
+        };
+        let t = link_tooltip(&l);
+        assert!(t.contains("dropping 23 frames"), "{t}");
+        assert!(t.contains("15 Mbps per 60 fps"), "{t}");
+        assert!(t.contains("It carried 9.5 Mbps."), "{t}");
+        assert!(t.contains("8 Mbps at Standard resolution"), "{t}");
+        l.suggested_bitrate = None;
+        l.suggested_capture_scale = None;
+        l.carried_kbps = None;
+        let t = link_tooltip(&l);
+        assert!(t.contains("no lower quality"), "{t}");
+        assert!(!t.contains("carried"), "{t}");
+    }
 
     fn goodbye(reason: &str, message: Option<&str>, min: Option<&str>) -> EndKind {
         EndKind::Goodbye {

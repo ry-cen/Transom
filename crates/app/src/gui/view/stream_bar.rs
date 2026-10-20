@@ -130,6 +130,23 @@ fn contents(ui: &mut Ui, cx: &Cx, s: &StreamView, out: &mut Vec<Msg>) {
                 {
                     view_only_chip(ui, &mut right_out);
                 }
+                // Shown whatever the stats preference: it explains a choppy picture.
+                if let Some(link) = s
+                    .session
+                    .host_settings
+                    .as_ref()
+                    .and_then(|h| h.link.as_ref())
+                    .filter(|l| l.is_behind())
+                {
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(texts::link_chip(link.withheld_per_second))
+                                .color(theme::ERROR),
+                        )
+                        .sense(Sense::hover()),
+                    )
+                    .on_hover_text(texts::link_tooltip(link));
+                }
                 if prefs.show_stats {
                     let pill = texts::stats_pill(s.session.rtt_ms, s.session.fps);
                     let tip = texts::stats_tooltip(s.session.rtt_ms, s.session.fps, &s.route_desc);

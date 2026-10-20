@@ -142,7 +142,24 @@ impl SessionState {
                 }
             }
             SessionEvent::AppIcon { bundle_id, png } => self.add_icon(bundle_id, png),
-            SessionEvent::HostSettings(s) => self.host_settings = Some(s),
+            SessionEvent::HostSettings(s) => {
+                let old = self.host_settings.as_ref().and_then(|h| h.link.as_ref());
+                if old != s.link.as_ref() {
+                    match &s.link {
+                        Some(l) => log::info!(
+                            "link {}: {} frames withheld/s at {} bit/s per 60 fps, carried {:?} kbit/s, suggested {:?} bit/s at scale {:?}",
+                            l.state,
+                            l.withheld_per_second,
+                            l.bitrate,
+                            l.carried_kbps,
+                            l.suggested_bitrate,
+                            l.suggested_capture_scale
+                        ),
+                        None => log::info!("link keeping up"),
+                    }
+                }
+                self.host_settings = Some(s);
+            }
             SessionEvent::CursorShape(_) => {}
             SessionEvent::MacInfo { info, fingerprint } => {
                 self.mac_info = Some((info, fingerprint));
