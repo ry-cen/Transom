@@ -55,6 +55,7 @@ The program is `target/release/transom` (`transom.exe` on Windows).
 
 - `transom-gui`, or `transom` with no arguments, opens the window. Pair a Mac from the list when it appears, or use **Add a Mac** with its address and the pairing code.
 - While streaming, hold Ctrl+Alt+Shift (Control+Option+Shift on macOS) and press a key: B shows or hides the bar, D selects the desktop, W the next window, S opens the Mac's settings, F toggles full screen and Q disconnects.
+- To leave full screen with no Mac connected, press Esc or F11, or click **Leave full screen** at the top of the Macs list.
 - On Windows, in full screen, the keys Windows keeps for itself go to the Mac too: the Win keys alone and with any key, Alt+Tab, Alt+Shift+Tab, Ctrl+Alt+Tab, Alt+Esc, Alt+F4, Alt+Space, Ctrl+Esc, Ctrl+Shift+Esc and PrintScreen (which does nothing on the Mac). With the PC layout, Win+C reaches the Mac as Control+C and Alt+Tab as Option+Tab. Ctrl+Alt+Shift+F leaves full screen and gives these keys back to Windows; Ctrl+Alt+Shift+Q still disconnects. Ctrl+Alt+Del always goes to Windows (no app can take it), and Win+L may still lock the PC. The `transom connect` viewer does not capture these keys.
 - Preferences are saved as `prefs.json` in the config folder (see `transom identity` for its path).
 - On Windows, `transom-gui.exe` opens no console window.

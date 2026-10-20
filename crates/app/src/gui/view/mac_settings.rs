@@ -30,6 +30,7 @@ pub fn draw(ui: &mut Ui, cx: &mut Cx, s: &StreamView) {
                         .max_height(height - 32.0 - FOOTER_HEIGHT)
                         .show(ui, |ui| {
                             connection(ui, s, &mac);
+                            stream(ui, s);
                             this_computer(ui, cx, s);
                         });
                     ui.separator();
@@ -55,6 +56,21 @@ fn connection(ui: &mut Ui, s: &StreamView, mac: &str) {
         RouteDesc::Unpinned | RouteDesc::Plain => texts::CONNECTED_UNPINNED.to_string(),
     };
     widgets::muted(ui, &line);
+    ui.add_space(12.0);
+}
+
+/// What the Mac actually runs: the encoded size, frame rate and bitrate after its caps, and
+/// whether it fell back to the software encoder.
+fn stream(ui: &mut Ui, s: &StreamView) {
+    ui.label(egui::RichText::new(texts::STREAM_HEADING).heading());
+    let hs = s.session.host_settings.as_ref();
+    match hs.and_then(|h| h.stream.as_ref()) {
+        Some(r) => widgets::muted(ui, &texts::running_stream(r)),
+        None => widgets::muted(ui, texts::STREAM_NONE),
+    }
+    if hs.is_some_and(|h| h.software_encoder) {
+        ui.label(egui::RichText::new(texts::SOFTWARE_ENCODER).color(theme::ERROR));
+    }
     ui.add_space(12.0);
 }
 

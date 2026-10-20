@@ -314,6 +314,11 @@ preference "Keep the bar open" makes the bar start pinned at every connect.
 (the Mac reports a link "behind") is a toast, BAR20, with [Lower Quality] (BAR19), which applies the Mac's
 suggested bitrate and resolution.
 
+**Link chip.** While the Mac reports the link "behind", the bar shows a chip, BAR25, in the error
+colour, whatever the stats preference. Its tooltip, BAR26, gives the withheld frames, the bitrate
+the link could not carry, what it carried, and the Mac's suggestion. Each change of the report is
+logged at info.
+
 ### 3.7 Apps popover (Phase 2)
 
 Anchored under Apps, 360 pt wide, at most 520 pt tall.
@@ -559,6 +564,8 @@ had no id.
 | BAR18 | V1 | View only: this Mac is the computer you are using. Sending its own input back to it would loop. | Chip tooltip |
 | BAR19 | — | Lower Quality | Link-notice toast button (Phase 2) |
 | BAR20 | — | The connection can’t keep up, so ‹Mac› is skipping frames. | Link-notice toast (Phase 2) |
+| BAR25 | — | Network behind · ‹n› dropped/s | Link chip in the bar |
+| BAR26 | — | The Mac is dropping ‹n› frames a second: the network to this computer cannot carry ‹rate› per 60 fps. It carried ‹rate›. Sill suggests ‹rate› at ‹Standard/Retina› resolution. Change it in Mac settings, or use a wired connection. | Link chip tooltip; the carried and suggestion sentences only when the Mac sends them |
 | APPS1 | — | Search apps on ‹Mac› | Search placeholder (Phase 2) |
 | APPS2 | — | Open Now | Section heading |
 | APPS3 | — | All Apps | Section heading |
@@ -602,6 +609,10 @@ had no id.
 | SET30 | — | Text Size | Phase 2 |
 | SET31 | — | Off | Text Size choice |
 | SET32 | — | Keymap | Panel row label |
+| SET34 | — | Stream | Mac settings panel heading for what the Mac runs |
+| SET35 | — | The Mac has not reported a running stream yet. | No `stream` in the host settings |
+| SET36 | — | The Mac encodes ‹w›×‹h› at up to ‹fps› fps, ‹n› Mbps[, on the virtual display]. | The host settings' `stream`; also logged at info on every change |
+| SET37 | — | Software encoder: the Mac's hardware encoder did not answer, so streams run at up to 60 fps at Standard until it recovers (the Mac checks every 30 s). | `softwareEncoder` true, in the error colour |
 | PREF1 | — | Name on your Macs | General |
 | PREF2 | G1 | Macs you already paired keep showing the old name. | Under PREF1 |
 | PREF3 | — | This computer's key | General |
@@ -707,7 +718,8 @@ stays Control+Option+Shift.
 |---|---|
 | Ctrl+, (Cmd+, on macOS) | Preferences |
 | Ctrl+N (Cmd+N on macOS) | Add a Mac |
-| Esc | close the top card, panel or dialog |
+| Esc | close the top card, panel or dialog; with none open, leave full screen |
+| F11 | toggle full screen (also Ctrl+Alt+Shift+F when no Mac is connected) |
 | Ctrl+= / Ctrl+− (Cmd+= / Cmd+− on macOS) | zoom the UI between 0.75 and 2.0; remembered |
 
 These are Transom-mode shortcuts. In Mac mode the same keys go to the Mac as ordinary keys and the

@@ -563,6 +563,118 @@ fn escape_closes_dialog() {
     assert_eq!(closes, 1, "{:?}", h.state().out);
 }
 
+/// Full screen can be left with no Mac connected: Escape, F11, the chord's F and a button.
+#[test]
+fn full_screen_can_be_left_from_the_macs_list() {
+    let now = Instant::now();
+    let toggles = |h: &Harness<'static, V>| {
+        h.state()
+            .out
+            .iter()
+            .filter(|m| matches!(m, Msg::ToggleFullscreen))
+            .count()
+    };
+    let full = || {
+        let mut m = model(now);
+        m.fullscreen = true;
+        m
+    };
+
+    let mut h = start(full(), now);
+    h.key_press(egui::Key::Escape);
+    h.run();
+    assert_eq!(toggles(&h), 1, "Escape: {:?}", h.state().out);
+
+    let mut h = start(full(), now);
+    h.key_press(egui::Key::F11);
+    h.run();
+    assert_eq!(toggles(&h), 1, "F11: {:?}", h.state().out);
+
+    let mut h = start(full(), now);
+    let chord = egui::Modifiers {
+        alt: true,
+        ctrl: true,
+        shift: true,
+        mac_cmd: false,
+        command: !cfg!(target_os = "macos"),
+    };
+    h.key_press_modifiers(chord, egui::Key::F);
+    h.run();
+    assert_eq!(toggles(&h), 1, "chord F: {:?}", h.state().out);
+
+    let mut h = start(full(), now);
+    h.get_by_label(texts::LEAVE_FULL_SCREEN).click();
+    h.run();
+    assert_eq!(toggles(&h), 1, "button: {:?}", h.state().out);
+
+    // Not in full screen: no button, and Escape does nothing.
+    let mut h = start(model(now), now);
+    assert!(h.query_by_label(texts::LEAVE_FULL_SCREEN).is_none());
+    h.key_press(egui::Key::Escape);
+    h.run();
+    assert_eq!(toggles(&h), 0, "{:?}", h.state().out);
+}
+
+/// The Mac settings panel shows what the Mac runs, and the software encoder in the error colour.
+#[test]
+fn mac_settings_shows_the_running_stream() {
+    let now = Instant::now();
+    let mut m = stream_model(now, false);
+    let hs = serde_json::from_str(
+        r#"{"settings": {"maxFPS": 120, "bitrate": 15000000, "captureScale": 2,
+            "prioritizeSpeed": false, "virtualDisplay": false},
+          "persistent": true, "virtualDisplayAvailable": false, "softwareEncoder": true,
+          "stream": {"width": 5120, "height": 2880, "fps": 120, "mbps": 30,
+            "onVirtualDisplay": false}}"#,
+    )
+    .unwrap();
+    let s = m.stream_mut().unwrap();
+    s.session.apply(SessionEvent::HostSettings(hs), now);
+    s.panel = Some(StreamPanel::MacSettings);
+    let h = start(m, now);
+    h.get_by_label("The Mac encodes 5120×2880 at up to 120 fps, 30 Mbps.");
+    h.get_by_label(texts::SOFTWARE_ENCODER);
+
+    let mut m = stream_model(now, false);
+    m.stream_mut().unwrap().panel = Some(StreamPanel::MacSettings);
+    let h = start(m, now);
+    h.get_by_label(texts::STREAM_NONE);
+    assert!(h.query_by_label(texts::SOFTWARE_ENCODER).is_none());
+}
+
+/// The bar shows Sill's link report while the Mac says the link is behind, and nothing else.
+#[test]
+fn bar_shows_the_link_report_while_behind() {
+    let now = Instant::now();
+    let with_link = |link: &str| {
+        let mut m = stream_model(now, false);
+        let json = format!(
+            r#"{{"settings": {{"maxFPS": 120, "bitrate": 15000000, "captureScale": 2,
+                "prioritizeSpeed": false, "virtualDisplay": false}},
+              "persistent": true, "virtualDisplayAvailable": false, "softwareEncoder": false
+              {link}}}"#
+        );
+        let hs = serde_json::from_str(&json).unwrap();
+        let s = m.stream_mut().unwrap();
+        s.session.apply(SessionEvent::HostSettings(hs), now);
+        s.bar.pinned = true;
+        m
+    };
+    let behind = r#", "link": {"state": "behind", "withheldPerSecond": 23, "bitrate": 15000000,
+        "carriedKbps": 9500, "suggestedBitrate": 8000000, "suggestedCaptureScale": 1}"#;
+    let h = start(with_link(behind), now);
+    h.get_by_label(&texts::link_chip(23));
+
+    for other in [
+        "",
+        r#", "link": {"state": "stalled", "withheldPerSecond": 5, "bitrate": 15000000}"#,
+    ] {
+        let h = start(with_link(other), now);
+        assert!(h.query_by_label(&texts::link_chip(5)).is_none());
+        assert!(h.query_by_label(&texts::link_chip(23)).is_none());
+    }
+}
+
 #[test]
 fn every_dialog_and_card_renders_with_default_fonts() {
     let now = Instant::now();

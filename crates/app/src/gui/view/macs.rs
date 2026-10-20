@@ -23,6 +23,9 @@ pub fn draw(ui: &mut Ui, cx: &mut Cx, card: Option<&Card>) {
                     tab: PrefsTab::General,
                 }));
             }
+            if cx.model.fullscreen && ui.button(texts::LEAVE_FULL_SCREEN).clicked() {
+                cx.out.push(Msg::ToggleFullscreen);
+            }
         });
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
