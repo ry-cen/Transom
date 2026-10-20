@@ -3,7 +3,9 @@
 //! source goes through `App::apply`, so the keyboard mode is recomputed (and held keys are
 //! released on a Mac-to-Transom change) after each model update. On Windows, in full screen with
 //! the Mac in charge of the keyboard, the low-level keyboard hook (winhook.rs) takes the keys
-//! Windows keeps for itself and hands them back here as `UserEvent::SysKey`.
+//! Windows keeps for itself and hands them back here as `UserEvent::SysKey`. On Linux, the X11
+//! keyboard grab or the Wayland shortcut inhibitor (linuxgrab.rs) makes the desktop pass those
+//! keys to the window, where they arrive as ordinary key events.
 
 use crate::gui::effects::{Effects, Platform};
 use crate::gui::images::ImageCache;
@@ -35,6 +37,21 @@ const ICON_PNG: &[u8] = include_bytes!("../../../../assets/icons/transom-64.png"
 /// No model tick more often than this, so a deadline that has passed but is not yet consumed
 /// cannot spin the loop.
 const MIN_TICK_GAP: Duration = Duration::from_millis(50);
+/// Full screen takes the keys the OS keeps for itself (spec 6.1): the Windows keyboard hook, or
+/// on Linux the X11 grab or Wayland shortcut inhibitor.
+const OS_CAPTURE: bool = cfg!(any(
+    windows,
+    all(
+        unix,
+        not(any(
+            target_os = "redox",
+            target_family = "wasm",
+            target_os = "android",
+            target_os = "ios",
+            target_os = "macos"
+        ))
+    )
+));
 
 /// Wake-ups from other threads.
 pub enum UserEvent {
@@ -103,11 +120,25 @@ struct App {
     browse_rx: Receiver<BrowseEvent>,
     watch: Option<Watch>,
     ctx: egui::Context,
+    /// The Linux X11 keyboard grab or Wayland shortcut inhibitor (declared before `window` so it
+    /// drops first).
+    #[cfg(all(
+        unix,
+        not(any(
+            target_os = "redox",
+            target_family = "wasm",
+            target_os = "android",
+            target_os = "ios",
+            target_os = "macos"
+        ))
+    ))]
+    grab: Option<crate::gui::linuxgrab::OsGrab>,
     window: Option<Arc<Window>>,
     gfx: Option<Gfx>,
     mods: ModifiersState,
     mode: KeyboardMode,
-    /// The Windows keyboard hook is taking the OS-reserved keys (`capture_wanted`).
+    /// Full screen is taking the OS-reserved keys for the Mac (`capture_wanted`): the Windows hook,
+    /// or the Linux grab or inhibitor.
     capturing: bool,
     #[cfg(windows)]
     hook: crate::gui::winhook::Hook,
@@ -195,6 +226,17 @@ pub fn run(
         browse_rx,
         watch,
         ctx: egui::Context::default(),
+        #[cfg(all(
+            unix,
+            not(any(
+                target_os = "redox",
+                target_family = "wasm",
+                target_os = "android",
+                target_os = "ios",
+                target_os = "macos"
+            ))
+        ))]
+        grab: None,
         window: None,
         gfx: None,
         mods: ModifiersState::empty(),
@@ -238,6 +280,18 @@ fn load_icon() -> Option<Icon> {
 impl App {
     /// Closes the stream (waiting briefly for queued input to flush) and stops discovery.
     fn shutdown(&mut self) {
+        // Ungrab or drop the inhibitor while the window and the display are alive.
+        #[cfg(all(
+            unix,
+            not(any(
+                target_os = "redox",
+                target_family = "wasm",
+                target_os = "android",
+                target_os = "ios",
+                target_os = "macos"
+            ))
+        ))]
+        drop(self.grab.take());
         // The hook goes first: this thread blocks in `close` below.
         #[cfg(windows)]
         self.hook.stop();
@@ -303,7 +357,7 @@ impl App {
 
     /// Spec 6.1: recomputed before every key event, after every model update and after every
     /// frame. Everything held on the Mac is released at each Mac-to-Transom change and whenever
-    /// the Windows keyboard hook stops capturing.
+    /// full-screen capture stops.
     fn recompute_mode(&mut self) {
         let stream = self.model.stream();
         let core = self.effects.stream();
@@ -315,21 +369,51 @@ impl App {
             egui_wants_keyboard: self.last_wants_kb,
         };
         let next = keyboard_mode(&inputs);
-        let capture = capture_wanted(next, self.model.fullscreen, cfg!(windows));
+        let capture = capture_wanted(next, self.model.fullscreen, OS_CAPTURE);
         let stop_capture = self.capturing && !capture;
         if capture != self.capturing {
             self.capturing = capture;
             #[cfg(windows)]
             self.set_hook(capture);
         }
-        // The hook keeps swallowing a captured key until it is released, and drops presses that
-        // arrive after capture stopped, so let go of everything on the Mac now.
+        #[cfg(all(
+            unix,
+            not(any(
+                target_os = "redox",
+                target_family = "wasm",
+                target_os = "android",
+                target_os = "ios",
+                target_os = "macos"
+            ))
+        ))]
+        self.sync_grab(capture);
+        // When capture stops, let go of everything on the Mac now: the Windows hook keeps
+        // swallowing a captured key until it is released and drops presses that arrive after, and
+        // on Linux the desktop takes the keys back.
         if transition(self.mode, next) || stop_capture {
             if let Some(core) = self.effects.stream_mut() {
                 core.release_all();
             }
         }
         self.mode = next;
+    }
+
+    /// Starts, keeps or stops the Linux grab or inhibitor (called after every recompute; cheap when
+    /// nothing changes).
+    #[cfg(all(
+        unix,
+        not(any(
+            target_os = "redox",
+            target_family = "wasm",
+            target_os = "android",
+            target_os = "ios",
+            target_os = "macos"
+        ))
+    ))]
+    fn sync_grab(&mut self, capture: bool) {
+        if let Some(g) = self.grab.as_mut() {
+            g.set(capture, self.focused, Instant::now());
+        }
     }
 
     /// Starts or stops the keyboard hook's capture.
@@ -616,6 +700,20 @@ impl ApplicationHandler<UserEvent> for App {
             state,
         });
         self.window = Some(window.clone());
+        #[cfg(all(
+            unix,
+            not(any(
+                target_os = "redox",
+                target_family = "wasm",
+                target_os = "android",
+                target_os = "ios",
+                target_os = "macos"
+            ))
+        ))]
+        {
+            self.grab =
+                crate::gui::linuxgrab::OsGrab::new(el.owned_display_handle(), window.clone());
+        }
         window.request_redraw();
     }
 
@@ -797,6 +895,19 @@ impl ApplicationHandler<UserEvent> for App {
             } else {
                 take(t);
             }
+        }
+        #[cfg(all(
+            unix,
+            not(any(
+                target_os = "redox",
+                target_family = "wasm",
+                target_os = "android",
+                target_os = "ios",
+                target_os = "macos"
+            ))
+        ))]
+        if let Some(t) = self.grab.as_mut().and_then(|g| g.poll(now)) {
+            take(t);
         }
         el.set_control_flow(match next {
             Some(t) => ControlFlow::WaitUntil(t),

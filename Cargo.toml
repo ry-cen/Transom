@@ -68,6 +68,13 @@ windows-sys = { version = "0.52.0", features = [
     "Win32_UI_WindowsAndMessaging",
 ] }
 
+# Full-screen key capture on Linux (crates/app/src/gui/x11grab.rs and wlinhibit.rs): the
+# versions winit 0.30 already uses, with features winit and smithay-client-toolkit already
+# turn on, so nothing new is built.
+x11-dl = "2.21.0"
+wayland-client = { version = "0.31.15", features = ["system"] }
+wayland-protocols = { version = "0.32.13", features = ["client", "unstable"] }
+
 # The graphical app (`transom-gui`, and `transom` with no subcommand). egui has no default
 # features: `default_fonts` is required or no text renders. 0.36.2 is the fallback (same wgpu and
 # winit requirements); never mix the two.

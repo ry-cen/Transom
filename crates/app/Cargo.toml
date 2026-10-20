@@ -35,6 +35,9 @@ gui = [
     "dep:serde",
     "dep:serde_json",
     "dep:windows-sys",
+    "dep:x11-dl",
+    "dep:wayland-client",
+    "dep:wayland-protocols",
 ]
 
 [dependencies]
@@ -60,6 +63,12 @@ serde_json = { workspace = true, optional = true }
 # The full-screen keyboard hook of the graphical app (src/gui/winhook.rs).
 [target.'cfg(windows)'.dependencies]
 windows-sys = { workspace = true, optional = true }
+
+# Full-screen key capture on Linux (src/gui/x11grab.rs, src/gui/wlinhibit.rs).
+[target.'cfg(all(unix, not(any(target_os = "redox", target_family = "wasm", target_os = "android", target_os = "ios", target_os = "macos"))))'.dependencies]
+x11-dl = { workspace = true, optional = true }
+wayland-client = { workspace = true, optional = true }
+wayland-protocols = { workspace = true, optional = true }
 
 [dev-dependencies]
 egui_kittest.workspace = true

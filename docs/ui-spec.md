@@ -33,7 +33,6 @@ folder, a fingerprint or a flag is. macOS is a supported build target, mainly fo
 - Several streams or several windows at once.
 - A light theme, or translation. Copy is English and lives in one file so translation can come
   later.
-- Keyboard grabs on X11 or Wayland.
 - Changing CLI behaviour. "CLI unchanged" means every subcommand, flag, output and exit code stays
   the same. The one intended change: in a build with the `gui` feature, `transom` with no
   subcommand opens the GUI instead of failing with a usage error (section 8.1).
@@ -736,9 +735,22 @@ are never taken, so the chord still works: chord+F leaves full screen and gives 
 Windows, and chord+Q disconnects. A key goes on to wherever its press went until it is released.
 Capture stops, and everything held on the Mac is released, when the window leaves full screen or
 loses the focus, a panel or dialog opens, or the session ends. Ctrl+Alt+Del cannot be captured:
-Windows handles it before any app sees it. Win+L may still lock the computer. In a window, and on
-Linux (Super on GNOME and KDE, Alt+Tab) and macOS, these keys stay with the OS and never reach the
-Mac. With the PC layout, Ctrl acts as Command, so Ctrl+Tab reaches the Mac as Cmd+Tab.
+Windows handles it before any app sees it. Win+L may still lock the computer.
+
+On Linux, under the same conditions, the desktop is asked to let go of its shortcuts, so Super
+alone and in every Super shortcut, Alt+Tab, Alt+F4 and the desktop's other shortcuts reach the
+Mac as ordinary keys; with the PC layout Super acts as Control and Alt as Option. On Wayland,
+Transom uses the keyboard-shortcuts-inhibit protocol on its window: GNOME asks the user once
+(at each start, or once for good when Transom's desktop file is installed), other compositors
+may allow it without asking, and a compositor without the protocol keeps its shortcuts. On X11
+Transom grabs the keyboard; under XWayland it also tells GNOME that the grab may hold back its
+shortcuts. Ctrl, Alt and Shift keep reaching Transom, so chord+F leaves full screen and gives
+the keys back, and chord+Q disconnects. Capture stops, and everything held on the Mac is
+released, at the same moments as on Windows. On GNOME, Super+Esc gives the shortcuts back to
+the desktop until full screen is entered again, and Ctrl+Alt+F1 to F12 still switch consoles.
+
+In a window, and on macOS, these keys stay with the OS and never reach the Mac. With the PC
+layout, Ctrl acts as Command, so Ctrl+Tab reaches the Mac as Cmd+Tab.
 
 ### 6.2 Pointer
 
@@ -796,11 +808,15 @@ Mac. With the PC layout, Ctrl acts as Command, so Ctrl+Tab reaches the Mac as Cm
 
   Phase 3 adds `MimeType=x-scheme-handler/sill;`.
 - Icons: an SVG plus PNGs at 16, 32, 48, 64, 128, 256 and 512 px.
-- Wayland: there is no keyboard grab, so the compositor keeps its shortcuts (Super, Alt+Tab). The
-  Mac's cursor size follows the window scale and some compositors misreport it; the README's
-  `WINIT_UNIX_BACKEND=x11` workaround stays. GNOME draws client-side decorations. Fractional
-  scaling works. The app id must be `transom` for the dock icon.
-- X11 works as today. A full-screen keyboard grab is out of scope.
+- Wayland: in full screen with the Mac in charge of the keyboard, Transom asks the compositor to
+  pass its shortcuts on (keyboard-shortcuts-inhibit, section 6.1); GNOME asks the user first, and
+  a compositor without the protocol keeps them (Super, Alt+Tab). The Mac's cursor size follows the
+  window scale and some compositors misreport it; the README's `WAYLAND_DISPLAY=` (empty, forcing
+  X11) workaround stays. GNOME draws client-side decorations. Fractional scaling works. The app id
+  must be `transom` for the dock icon and for GNOME to remember the shortcut permission.
+- X11 and XWayland: in full screen with the Mac in charge of the keyboard, Transom grabs the
+  keyboard (section 6.1) and retries while another program holds it. Under XWayland it sends
+  `_XWAYLAND_MAY_GRAB_KEYBOARD`, so GNOME lets the grab hold back its shortcuts.
 - No new system packages. FFmpeg is still required.
 
 ### 7.2 Windows
@@ -998,8 +1014,9 @@ files per OS, loaded at start-up).
 
 Includes: Linux desktop file and icons; Windows `.ico` resource and zip; macOS `.app`; the
 `sill://` URL handler (`transom-gui sill://pair?…` opens Add a Mac with the link and its
-confirmation ADD10, and never pairs without that confirmation); the Windows system-key hook in
-full screen; `crash.log`. All are manual, on each OS.
+confirmation ADD10, and never pairs without that confirmation); full-screen system-key capture (the
+Windows hook, the X11 grab and the Wayland shortcut inhibitor); `crash.log`. All are manual, on
+each OS.
 
 - The launcher shows the icon; the dock or taskbar groups the window under Transom. (manual, per
   OS)
@@ -1007,6 +1024,9 @@ full screen; `crash.log`. All are manual, on each OS.
 - In full screen, the Win key, Alt+Tab and Alt+F4 reach the Mac (as Control, Option+Tab and
   Option+F4 with the PC layout) and Windows does nothing with them; chord+F still leaves full
   screen. (real Mac, Windows)
+- On Linux in full screen, Super, Alt+Tab and Alt+F4 reach the Mac (as Control, Option+Tab and
+  Option+F4 with the PC layout) and the desktop does nothing with them, on GNOME Wayland once the
+  prompt is allowed and on X11 and XWayland; chord+F still leaves full screen. (real Mac, Linux)
 
 ### Phase 4: protocol extras
 
