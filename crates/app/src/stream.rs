@@ -21,8 +21,8 @@ use transom_proto::compat::client_hello;
 use transom_proto::geometry::letterbox;
 use transom_proto::messages::{InputEvent, StreamSource, Viewport};
 use transom_render::cursor::cursor_image;
-use transom_render::{Renderer, YuvFrame};
-use transom_video::{spawn_decoder, DecodedFrame};
+use transom_render::{Chroma, Renderer, YuvFrame};
+use transom_video::{spawn_decoder, DecodedFrame, Planes};
 use winit::event::{MouseButton, MouseScrollDelta, TouchPhase};
 use winit::event_loop::ActiveEventLoop;
 use winit::keyboard::{KeyCode, ModifiersState};
@@ -398,15 +398,30 @@ impl StreamCore {
             return false;
         };
         let before = renderer.video_size();
+        let (y, chroma) = match f.planes() {
+            Planes::I420 { y, u, v } => (
+                y,
+                Chroma::I420 {
+                    u: u.data,
+                    u_stride: u.stride,
+                    v: v.data,
+                    v_stride: v.stride,
+                },
+            ),
+            Planes::Nv12 { y, uv } => (
+                y,
+                Chroma::Nv12 {
+                    uv: uv.data,
+                    uv_stride: uv.stride,
+                },
+            ),
+        };
         renderer.upload(&YuvFrame {
             width: f.width,
             height: f.height,
-            y: &f.y,
-            y_stride: f.y_stride,
-            u: &f.u,
-            u_stride: f.u_stride,
-            v: &f.v,
-            v_stride: f.v_stride,
+            y: y.data,
+            y_stride: y.stride,
+            chroma,
             full_range: f.full_range,
             bt601: f.bt601,
         });
