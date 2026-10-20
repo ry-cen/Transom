@@ -563,6 +563,58 @@ fn escape_closes_dialog() {
     assert_eq!(closes, 1, "{:?}", h.state().out);
 }
 
+/// Full screen can be left with no Mac connected: Escape, F11, the chord's F and a button.
+#[test]
+fn full_screen_can_be_left_from_the_macs_list() {
+    let now = Instant::now();
+    let toggles = |h: &Harness<'static, V>| {
+        h.state()
+            .out
+            .iter()
+            .filter(|m| matches!(m, Msg::ToggleFullscreen))
+            .count()
+    };
+    let full = || {
+        let mut m = model(now);
+        m.fullscreen = true;
+        m
+    };
+
+    let mut h = start(full(), now);
+    h.key_press(egui::Key::Escape);
+    h.run();
+    assert_eq!(toggles(&h), 1, "Escape: {:?}", h.state().out);
+
+    let mut h = start(full(), now);
+    h.key_press(egui::Key::F11);
+    h.run();
+    assert_eq!(toggles(&h), 1, "F11: {:?}", h.state().out);
+
+    let mut h = start(full(), now);
+    let chord = egui::Modifiers {
+        alt: true,
+        ctrl: true,
+        shift: true,
+        mac_cmd: false,
+        command: !cfg!(target_os = "macos"),
+    };
+    h.key_press_modifiers(chord, egui::Key::F);
+    h.run();
+    assert_eq!(toggles(&h), 1, "chord F: {:?}", h.state().out);
+
+    let mut h = start(full(), now);
+    h.get_by_label(texts::LEAVE_FULL_SCREEN).click();
+    h.run();
+    assert_eq!(toggles(&h), 1, "button: {:?}", h.state().out);
+
+    // Not in full screen: no button, and Escape does nothing.
+    let mut h = start(model(now), now);
+    assert!(h.query_by_label(texts::LEAVE_FULL_SCREEN).is_none());
+    h.key_press(egui::Key::Escape);
+    h.run();
+    assert_eq!(toggles(&h), 0, "{:?}", h.state().out);
+}
+
 #[test]
 fn every_dialog_and_card_renders_with_default_fonts() {
     let now = Instant::now();

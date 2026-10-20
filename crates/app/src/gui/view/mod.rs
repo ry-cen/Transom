@@ -138,7 +138,20 @@ fn shortcuts(ui: &mut egui::Ui, cx: &mut Cx) {
             cx.out.push(Msg::ClosePanel);
         } else if card_open {
             cx.out.push(Msg::CancelCard);
+        } else if cx.model.fullscreen {
+            cx.out.push(Msg::ToggleFullscreen);
         }
+    }
+    // F11 anywhere, and the streaming chord's F when no Mac is connected (the chord itself only
+    // runs while streaming), so full screen can always be left.
+    let fullscreen_key = ui.input_mut(|i| {
+        let m = i.modifiers;
+        let chord = cx.model.stream().is_none() && m.ctrl && m.alt && m.shift;
+        let f11 = i.consume_key(Modifiers::NONE, Key::F11);
+        f11 || (chord && i.consume_key(m, Key::F))
+    });
+    if fullscreen_key {
+        cx.out.push(Msg::ToggleFullscreen);
     }
     if ui.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::Comma)) {
         cx.out.push(Msg::OpenDialog(Dialog::Preferences {
