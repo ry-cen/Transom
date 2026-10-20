@@ -718,7 +718,8 @@ stays Control+Option+Shift.
 |---|---|
 | Ctrl+, (Cmd+, on macOS) | Preferences |
 | Ctrl+N (Cmd+N on macOS) | Add a Mac |
-| Esc | close the top card, panel or dialog |
+| Esc | close the top card, panel or dialog; with none open, leave full screen |
+| F11 | toggle full screen (also Ctrl+Alt+Shift+F when no Mac is connected) |
 | Ctrl+= / Ctrl+− (Cmd+= / Cmd+− on macOS) | zoom the UI between 0.75 and 2.0; remembered |
 
 These are Transom-mode shortcuts. In Mac mode the same keys go to the Mac as ordinary keys and the

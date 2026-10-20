@@ -55,6 +55,7 @@ The program is `target/release/transom` (`transom.exe` on Windows).
 
 - `transom-gui`, or `transom` with no arguments, opens the window. Pair a Mac from the list when it appears, or use **Add a Mac** with its address and the pairing code.
 - While streaming, hold Ctrl+Alt+Shift (Control+Option+Shift on macOS) and press a key: B shows or hides the bar, D selects the desktop, W the next window, S opens the Mac's settings, F toggles full screen and Q disconnects.
+- To leave full screen with no Mac connected, press Esc or F11, or click **Leave full screen** at the top of the Macs list.
 - Preferences are saved as `prefs.json` in the config folder (see `transom identity` for its path).
 - On Windows, `transom-gui.exe` opens no console window.
 
