@@ -21,6 +21,7 @@ use transom_net::store::SavedMac;
 use transom_net::supervisor::Route;
 use transom_net::NetError;
 use transom_proto::address::parse_address;
+use transom_proto::host_settings::{HostSettingsChange, SettingsField};
 use transom_proto::messages::goodbye_reason as gr;
 use transom_proto::messages::{PairResult, StreamSource};
 use transom_proto::pairing::HomeDoor;
@@ -42,6 +43,16 @@ pub const HINT_AFTER: Duration = Duration::from_secs(5);
 pub const TOAST_TIME: Duration = Duration::from_secs(4);
 /// SET25 shows when no settings came this long after connecting (spec 3.8; Phase 2 panel).
 pub const SETTINGS_WAIT: Duration = Duration::from_secs(2);
+/// A row shows a spinner once its pick has been pending this long, so a quick Mac never
+/// flickers (D12; Sill's PendingSpinner).
+pub const SPINNER_DELAY: Duration = Duration::from_millis(300);
+/// The tick for an expired pick lands this far past the timeout, so it is strictly past (D4).
+pub const PICK_EXPIRY_SLACK: Duration = Duration::from_millis(50);
+/// A report must be clear this long before the next "behind" counts as a new spell (D7; Sill's
+/// `LinkLine.linger`).
+pub const LINK_LINGER: Duration = Duration::from_secs(2);
+/// BAR20 shows at most once in this time (D7).
+pub const LINK_TOAST_GAP: Duration = Duration::from_secs(30);
 /// The UI zoom's range (spec 6.1).
 pub const ZOOM_MIN: f32 = 0.75;
 pub const ZOOM_MAX: f32 = 2.0;
@@ -73,6 +84,9 @@ pub struct Model {
     pub draft_seed: DraftSeed,
     /// The generation number the next card gets.
     pub next_gen: u64,
+    /// The next kind 17 token: strictly increasing for the life of the process, never reset
+    /// (Sill's settingsToken).
+    pub next_settings_token: i64,
 }
 
 /// Text field contents the model wants the view to put in its drafts. None leaves a field as
@@ -198,6 +212,13 @@ pub struct StreamView {
     pub panel: Option<StreamPanel>,
     /// BAR12 was shown in this session.
     pub window_toast_shown: bool,
+    /// A "behind" spell is running: a state arrived whose link is behind, and it has not been
+    /// clear for `LINK_LINGER` since (D7). Not reset on Ended or reconnect.
+    pub link_spell: bool,
+    /// When the running spell's report first turned clear.
+    pub link_clear_since: Option<Instant>,
+    /// When BAR20 last showed (D7).
+    pub link_toast_at: Option<Instant>,
 }
 
 /// How the stream was reached, for SET1-SET3 and BAR5. The address is `session.peer`.
@@ -339,6 +360,9 @@ pub enum Msg {
     SelectDesktop,
     SelectWindow(u32),
     NextWindow,
+    /// A Mac Settings control (spec 3.8 B/C): the fields it sets, as absolute values; the token
+    /// is ignored. Goes through the ledger; only what changes the shown value is sent.
+    ChangeSettings(HostSettingsChange),
     /// The handle, or chord+B.
     ToggleBar,
     /// The pointer is (true) or is no longer (false) over the handle area or the shown bar.
@@ -537,7 +561,43 @@ impl StreamView {
             bar: BarState::default(),
             panel: None,
             window_toast_shown: false,
+            link_spell: false,
+            link_clear_since: None,
+            link_toast_at: None,
         }
+    }
+
+    /// The row for `field` has a pick pending for `SPINNER_DELAY` or more (D12).
+    pub fn pick_spinner(&self, field: SettingsField, now: Instant) -> bool {
+        self.session
+            .settings
+            .pending_since(field)
+            .is_some_and(|t| now >= t + SPINNER_DELAY)
+    }
+
+    /// No state has come `SETTINGS_WAIT` after connecting (SET25).
+    pub fn settings_overdue(&self, now: Instant) -> bool {
+        self.session.settings.host().is_none()
+            && self.session.is_connected()
+            && self
+                .session
+                .connected_at
+                .is_some_and(|c| now >= c + SETTINGS_WAIT)
+    }
+
+    /// What [Lower Quality] would send, if the button applies now (D6).
+    pub fn lower_quality_change(&self) -> Option<HostSettingsChange> {
+        let h = self.session.settings.host()?;
+        let link = h.link.as_ref().filter(|l| l.is_behind())?;
+        if h.away
+            .as_ref()
+            .is_some_and(|a| a.this_connection_away && !a.away_running)
+        {
+            return None;
+        }
+        let c = link.suggestion()?;
+        let shown = self.session.settings.displayed()?;
+        (c.applied_to(&shown) != shown).then_some(c)
     }
 
     /// The bar is shown (spec 3.6): while not connected, while pinned, while a panel is open,
@@ -594,6 +654,7 @@ impl Model {
             draft_epoch: 0,
             draft_seed: DraftSeed::default(),
             next_gen: 1,
+            next_settings_token: 1,
         };
         m.refresh_rows();
         m
@@ -843,12 +904,19 @@ impl Model {
             Msg::SetRemoteHost { mac_id, host } => self.set_remote_host(mac_id, host),
             Msg::Copy(s) => vec![Effect::CopyText(s)],
             Msg::OpenUrl(u) => vec![Effect::OpenUrl(u)],
-            Msg::ToastAction(_) => Vec::new(),
+            Msg::ChangeSettings(c) => self.pick_settings(&c, now),
+            Msg::ToastAction(ToastAction::LowerQuality) => self.lower_quality(now),
         }
     }
 
     fn on_tick(&mut self, now: Instant) -> Vec<Effect> {
         self.toasts.retain(|t| t.until > now);
+        if let Some(s) = self.stream_mut() {
+            let t = s.session.settings_timeout();
+            if s.session.settings.expire(now, t) {
+                log::info!("settings: no answer within {t:?}; showing the Mac's values");
+            }
+        }
         let plan = match &self.screen {
             Screen::Macs {
                 card: Some(Card::Pair(p)),
@@ -888,9 +956,42 @@ impl Model {
             SessionEvent::Finished { text, kind } => Some((text.clone(), kind.clone())),
             _ => None,
         };
+        let refusals = s.session.settings_refusals;
+        let is_settings = matches!(ev, SessionEvent::HostSettings(_));
         s.session.apply(ev, now);
+        let refused = s.session.settings_refusals != refusals;
+        let mut link_toast = None;
+        if is_settings {
+            let behind = s
+                .session
+                .settings
+                .host()
+                .and_then(|h| h.link.as_ref())
+                .is_some_and(|l| l.is_behind());
+            if behind {
+                let new_spell =
+                    !s.link_spell || s.link_clear_since.is_some_and(|t| now >= t + LINK_LINGER);
+                s.link_clear_since = None;
+                if new_spell {
+                    s.link_spell = true;
+                    if s.link_toast_at.is_none_or(|t| now >= t + LINK_TOAST_GAP) {
+                        s.link_toast_at = Some(now);
+                        link_toast =
+                            Some(s.lower_quality_change().map(|_| ToastAction::LowerQuality));
+                    }
+                }
+            } else if s.link_spell && s.link_clear_since.is_none() {
+                s.link_clear_since = Some(now);
+            }
+        }
         let mac_name = s.session.mac_name.clone();
         let mac_id = s.mac_id.clone();
+        if refused {
+            self.show_toast(texts::kept_setting(&mac_name), None, now);
+        }
+        if let Some(action) = link_toast {
+            self.show_toast(texts::link_behind(&mac_name), action, now);
+        }
         let Some((text, kind)) = fin else {
             return Vec::new();
         };
@@ -1341,6 +1442,46 @@ impl Model {
         out
     }
 
+    /// Shows a toast, or refreshes the live one with the same text instead of stacking (D8).
+    fn show_toast(&mut self, text: String, action: Option<ToastAction>, now: Instant) {
+        if let Some(t) = self.toasts.iter_mut().find(|t| t.text == text) {
+            t.until = now + TOAST_TIME;
+            t.action = action;
+        } else {
+            self.toasts.push(Toast {
+                text,
+                until: now + TOAST_TIME,
+                action,
+            });
+        }
+    }
+
+    /// A Mac Settings pick, through the ledger (spec 3.8 B/C).
+    fn pick_settings(&mut self, c: &HostSettingsChange, now: Instant) -> Vec<Effect> {
+        let token = self.next_settings_token;
+        let Some(s) = self.stream_mut() else {
+            return Vec::new();
+        };
+        match s.session.settings.pick(c, token, now) {
+            Some(out) => {
+                self.next_settings_token += 1;
+                log::info!("settings: asking the Mac for {out:?}");
+                vec![Effect::Session(SessionCommand::ChangeSettings(out))]
+            }
+            None => Vec::new(),
+        }
+    }
+
+    /// [Lower Quality] on the BAR20 toast: dismiss it and send the current suggestion, if any.
+    fn lower_quality(&mut self, now: Instant) -> Vec<Effect> {
+        self.toasts
+            .retain(|t| t.action != Some(ToastAction::LowerQuality));
+        let Some(c) = self.stream().and_then(|s| s.lower_quality_change()) else {
+            return Vec::new();
+        };
+        self.pick_settings(&c, now)
+    }
+
     fn select_window(&mut self, id: u32, now: Instant) -> Vec<Effect> {
         let mut toast = None;
         if let Some(s) = self.stream_mut() {
@@ -1513,7 +1654,8 @@ impl Model {
     }
 
     /// The next time the model needs a `Msg::Tick` (bar timing, the countdown, the paired
-    /// pause, the waiting card, LIST3, toasts).
+    /// pause, the waiting card, LIST3, toasts, the oldest unanswered pick's expiry, a pick's
+    /// spinner delay, and SET25's wait).
     pub fn next_deadline(&self, now: Instant) -> Option<Instant> {
         let mut best: Option<Instant> = None;
         let mut take = |t: Instant| best = Some(best.map_or(t, |b| b.min(t)));
@@ -1552,6 +1694,22 @@ impl Model {
                     }
                 }
                 _ => {}
+            }
+            if let Some(o) = s.session.settings.oldest_pending() {
+                take(o + s.session.settings_timeout() + PICK_EXPIRY_SLACK);
+            }
+            for p in s.session.settings.pending().values() {
+                let t = p.sent_at + SPINNER_DELAY;
+                if t > now {
+                    take(t);
+                }
+            }
+            if s.session.is_connected() && s.session.settings.host().is_none() {
+                if let Some(c) = s.session.connected_at {
+                    if c + SETTINGS_WAIT > now {
+                        take(c + SETTINGS_WAIT);
+                    }
+                }
             }
             for t in [
                 s.bar.hover_since.map(|t| t + BAR_HOVER_DELAY),
@@ -2298,6 +2456,285 @@ mod tests {
         assert_eq!(m.toasts.len(), 1);
         m.update(Msg::Tick, now + TOAST_TIME);
         assert!(m.toasts.is_empty());
+    }
+
+    use transom_proto::host_settings::HostSettingsState;
+
+    fn settings_state(json_extra: &str) -> HostSettingsState {
+        let json = format!(
+            r#"{{"settings": {{"maxFPS": 60, "bitrate": 15000000, "captureScale": 2,
+            "prioritizeSpeed": false, "virtualDisplay": false}},
+            "persistent": true, "virtualDisplayAvailable": false,
+            "softwareEncoder": false{json_extra}}}"#
+        );
+        serde_json::from_str(&json).unwrap()
+    }
+
+    fn feed(m: &mut Model, hs: HostSettingsState, now: Instant) {
+        m.update(Msg::Session(SessionEvent::HostSettings(hs)), now);
+    }
+
+    fn fps(v: i64) -> Msg {
+        Msg::ChangeSettings(HostSettingsChange {
+            max_fps: Some(v),
+            ..Default::default()
+        })
+    }
+
+    fn shown(m: &Model) -> transom_proto::host_settings::StreamSettings {
+        m.stream().unwrap().session.settings.displayed().unwrap()
+    }
+
+    const BEHIND: &str = r#", "link": {"state": "behind", "withheldPerSecond": 9,
+        "bitrate": 15000000, "suggestedBitrate": 8000000, "suggestedCaptureScale": 1}"#;
+
+    #[test]
+    fn change_settings_without_state_sends_nothing() {
+        let (mut m, now) = connected_model(None);
+        assert!(m.update(fps(120), now).is_empty());
+        assert_eq!(m.next_settings_token, 1);
+    }
+
+    #[test]
+    fn change_settings_sends_with_increasing_tokens() {
+        let (mut m, now) = connected_model(None);
+        feed(&mut m, settings_state(""), now);
+        let fx = m.update(fps(120), now);
+        let [Effect::Session(SessionCommand::ChangeSettings(c))] = fx.as_slice() else {
+            panic!("{fx:?}");
+        };
+        assert_eq!(c.token, Some(1));
+        assert_eq!(c.max_fps, Some(120));
+        let fx = m.update(
+            Msg::ChangeSettings(HostSettingsChange {
+                bitrate: Some(25_000_000),
+                ..Default::default()
+            }),
+            now,
+        );
+        let [Effect::Session(SessionCommand::ChangeSettings(c))] = fx.as_slice() else {
+            panic!("{fx:?}");
+        };
+        assert_eq!(c.token, Some(2));
+        assert!(m.update(fps(120), now).is_empty());
+        assert_eq!(m.next_settings_token, 3);
+    }
+
+    #[test]
+    fn refused_answer_snaps_back_and_toasts_once() {
+        let (mut m, now) = connected_model(None);
+        feed(&mut m, settings_state(""), now);
+        let fx = m.update(
+            Msg::ChangeSettings(HostSettingsChange {
+                virtual_display: Some(true),
+                ..Default::default()
+            }),
+            now,
+        );
+        assert_eq!(fx.len(), 1);
+        assert!(shown(&m).virtual_display);
+        feed(&mut m, settings_state(r#", "answering": 1"#), now);
+        assert!(!shown(&m).virtual_display);
+        assert_eq!(m.toasts.len(), 1);
+        assert_eq!(m.toasts[0].text, texts::kept_setting("Mock Mac"));
+        assert_eq!(m.toasts[0].action, None);
+        feed(&mut m, settings_state(""), now);
+        assert_eq!(m.toasts.len(), 1);
+    }
+
+    #[test]
+    fn accepted_answer_shows_the_value_without_toast() {
+        let (mut m, now) = connected_model(None);
+        feed(&mut m, settings_state(""), now);
+        m.update(fps(120), now);
+        let mut hs = settings_state(r#", "answering": 1"#);
+        hs.settings.max_fps = 120;
+        feed(&mut m, hs, now);
+        assert_eq!(shown(&m).max_fps, 120);
+        assert!(m.stream().unwrap().session.settings.pending().is_empty());
+        assert!(m.toasts.is_empty());
+    }
+
+    #[test]
+    fn unanswered_pick_reverts_after_the_timeout() {
+        let (mut m, now) = connected_model(None);
+        feed(&mut m, settings_state(""), now);
+        m.update(fps(120), now);
+        assert_eq!(shown(&m).max_fps, 120);
+        let d = m.next_deadline(now).expect("a deadline");
+        assert!(d <= now + Duration::from_secs(4) + PICK_EXPIRY_SLACK);
+        assert_eq!(
+            m.next_deadline(now + Duration::from_secs(2)),
+            Some(now + Duration::from_secs(4) + PICK_EXPIRY_SLACK)
+        );
+        m.update(Msg::Tick, now + Duration::from_secs(4));
+        assert_eq!(shown(&m).max_fps, 120);
+        m.update(Msg::Tick, now + Duration::from_secs(4) + PICK_EXPIRY_SLACK);
+        assert_eq!(shown(&m).max_fps, 60);
+        assert!(m.toasts.is_empty());
+    }
+
+    #[test]
+    fn timeout_scales_with_the_worst_round_trip() {
+        let (mut m, now) = connected_model(None);
+        feed(&mut m, settings_state(""), now);
+        m.update(
+            Msg::Session(SessionEvent::Stats {
+                rtt_ms: Some(900.0),
+                rtt_max_ms: Some(2000.0),
+                fps: 60,
+            }),
+            now,
+        );
+        m.update(fps(120), now);
+        m.update(Msg::Tick, now + Duration::from_secs(5));
+        assert_eq!(shown(&m).max_fps, 120);
+        m.update(Msg::Tick, now + Duration::from_secs(8) + PICK_EXPIRY_SLACK);
+        assert_eq!(shown(&m).max_fps, 60);
+    }
+
+    #[test]
+    fn spinner_shows_after_300_ms() {
+        let (mut m, now) = connected_model(None);
+        feed(&mut m, settings_state(""), now);
+        m.update(fps(120), now);
+        let s = m.stream().unwrap();
+        assert!(!s.pick_spinner(SettingsField::MaxFps, now + Duration::from_millis(299)));
+        assert!(s.pick_spinner(SettingsField::MaxFps, now + Duration::from_millis(300)));
+        assert!(!s.pick_spinner(SettingsField::Bitrate, now + Duration::from_secs(1)));
+        assert!(m.next_deadline(now).unwrap() <= now + SPINNER_DELAY);
+    }
+
+    #[test]
+    fn settings_overdue_after_two_seconds() {
+        let (mut m, now) = connected_model(None);
+        let s = m.stream().unwrap();
+        assert!(!s.settings_overdue(now + Duration::from_millis(1999)));
+        assert!(s.settings_overdue(now + Duration::from_secs(2)));
+        assert!(m.next_deadline(now).unwrap() <= now + SETTINGS_WAIT);
+        assert_eq!(
+            m.next_deadline(now + Duration::from_millis(1600)),
+            Some(now + SETTINGS_WAIT)
+        );
+        feed(&mut m, settings_state(""), now);
+        assert!(!m
+            .stream()
+            .unwrap()
+            .settings_overdue(now + Duration::from_secs(5)));
+    }
+
+    #[test]
+    fn link_behind_toasts_once_per_spell() {
+        let (mut m, now) = connected_model(None);
+        let at = |s: u64| now + Duration::from_millis(s * 100);
+        feed(&mut m, settings_state(BEHIND), now);
+        assert_eq!(m.toasts.len(), 1);
+        assert_eq!(m.toasts[0].text, texts::link_behind("Mock Mac"));
+        assert_eq!(m.toasts[0].action, Some(ToastAction::LowerQuality));
+        let until = m.toasts[0].until;
+        feed(&mut m, settings_state(BEHIND), at(10));
+        assert_eq!(m.toasts.len(), 1);
+        assert_eq!(m.toasts[0].until, until);
+        // Linger blocks: the 30 s gap has passed, so only LINK_LINGER can.
+        m.update(Msg::Tick, at(400));
+        assert!(m.toasts.is_empty());
+        feed(&mut m, settings_state(""), at(400));
+        feed(&mut m, settings_state(BEHIND), at(415));
+        assert!(m.toasts.is_empty());
+        feed(&mut m, settings_state(""), at(500));
+        feed(&mut m, settings_state(BEHIND), at(530));
+        assert_eq!(m.toasts.len(), 1);
+    }
+
+    #[test]
+    fn link_toast_gap_blocks_a_quick_new_spell() {
+        let (mut m, now) = connected_model(None);
+        feed(&mut m, settings_state(BEHIND), now);
+        assert_eq!(m.toasts.len(), 1);
+        feed(&mut m, settings_state(""), now + Duration::from_secs(1));
+        m.update(Msg::Tick, now + Duration::from_secs(4));
+        assert!(m.toasts.is_empty());
+        feed(&mut m, settings_state(BEHIND), now + Duration::from_secs(4));
+        assert!(m.toasts.is_empty());
+        let s = m.stream().unwrap();
+        assert!(s.link_spell);
+        assert_eq!(s.link_toast_at, Some(now));
+    }
+
+    #[test]
+    fn link_toast_has_no_button_without_a_bitrate_or_when_away_at_home_quality() {
+        let (mut m, now) = connected_model(None);
+        feed(
+            &mut m,
+            settings_state(
+                r#", "link": {"state": "behind", "withheldPerSecond": 9,
+                "bitrate": 15000000, "suggestedCaptureScale": 1}"#,
+            ),
+            now,
+        );
+        assert_eq!(m.toasts.len(), 1);
+        assert_eq!(m.toasts[0].action, None);
+
+        let (mut m, now) = connected_model(None);
+        let away = r#", "away": {"homeBitrate": 15000000, "homeCaptureScale": 2,
+            "awayBitrate": 8000000, "awayCaptureScale": 1,
+            "thisConnectionAway": true, "awayRunning": false}"#;
+        feed(&mut m, settings_state(&format!("{BEHIND}{away}")), now);
+        assert_eq!(m.toasts.len(), 1);
+        assert_eq!(m.toasts[0].action, None);
+    }
+
+    #[test]
+    fn lower_quality_applies_the_suggestion() {
+        let (mut m, now) = connected_model(None);
+        feed(&mut m, settings_state(BEHIND), now);
+        let fx = m.update(Msg::ToastAction(ToastAction::LowerQuality), now);
+        let [Effect::Session(SessionCommand::ChangeSettings(c))] = fx.as_slice() else {
+            panic!("{fx:?}");
+        };
+        assert_eq!(c.bitrate, Some(8_000_000));
+        assert_eq!(c.capture_scale, Some(1.0));
+        assert!(c.token.is_some());
+        assert!(m
+            .toasts
+            .iter()
+            .all(|t| t.action != Some(ToastAction::LowerQuality)));
+        let fx = m.update(Msg::ToastAction(ToastAction::LowerQuality), now);
+        assert!(fx.is_empty());
+    }
+
+    #[test]
+    fn tokens_continue_after_reconnect() {
+        let (mut m, now) = connected_model(None);
+        feed(&mut m, settings_state(""), now);
+        let fx = m.update(fps(120), now);
+        assert!(matches!(
+            fx.as_slice(),
+            [Effect::Session(SessionCommand::ChangeSettings(c))] if c.token == Some(1)
+        ));
+        m.update(
+            Msg::Session(SessionEvent::Ended {
+                text: "x".into(),
+                retry_in: Some(Duration::from_secs(1)),
+                kind: EndKind::Lost,
+            }),
+            now,
+        );
+        assert!(m.stream().unwrap().session.settings.host().is_none());
+        m.update(
+            Msg::Session(SessionEvent::Connected {
+                mac_name: "Mock Mac".into(),
+                peer: "127.0.0.1:1".parse().unwrap(),
+                local_peer: false,
+            }),
+            now,
+        );
+        feed(&mut m, settings_state(""), now);
+        let fx = m.update(fps(120), now);
+        assert!(matches!(
+            fx.as_slice(),
+            [Effect::Session(SessionCommand::ChangeSettings(c))] if c.token == Some(2)
+        ));
     }
 
     #[test]

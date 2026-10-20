@@ -20,7 +20,9 @@ use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, Notify};
 use transom_proto::blobs::CursorShape;
-use transom_proto::host_settings::{HostSettingsChange, HostSettingsState};
+use transom_proto::host_settings::{
+    HostSettingsChange, HostSettingsState, CHOICES_CAPTURE_SCALE, CHOICES_MAX_FPS, QUALITY_PRESETS,
+};
 use transom_proto::identity::{
     b64url_decode, b64url_encode, fingerprint_of_certificate, fingerprint_of_spki, mac_id,
 };
@@ -72,8 +74,12 @@ pub struct MockConfig {
     pub icons: Vec<(String, Vec<u8>)>,
     /// Kind 5, sent after the first window list when not empty.
     pub apps: Vec<AppInfo>,
-    /// Kind 16 sent after the thumbnails; also the state kind 17 changes are laid over.
+    /// Kind 16 sent after the thumbnails; also the state kind 17 changes are laid over, after
+    /// Sill's acceptance rule; a refused field keeps its value.
     pub host_settings: Option<HostSettingsState>,
+    /// Kind 17 changes are recorded as `MockEvent::ChangeSettings` but never applied or
+    /// answered (for the device's pick timeout).
+    pub settings_silent: bool,
     /// Where to listen; default 127.0.0.1:0. mockhost --bonjour uses 0.0.0.0:0.
     pub listen: SocketAddr,
 }
@@ -109,8 +115,29 @@ impl Default for MockConfig {
             icons: Vec::new(),
             apps: Vec::new(),
             host_settings: None,
+            settings_silent: false,
             listen: SocketAddr::from(([127, 0, 0, 1], 0)),
         }
+    }
+}
+
+/// The host's acceptance rule for a change (Sill's DeviceSettings): the fields it takes. A
+/// field outside its choices, or a virtual display that is unavailable, is dropped.
+fn accepted(c: &HostSettingsChange, virtual_display_available: bool) -> HostSettingsChange {
+    HostSettingsChange {
+        token: c.token,
+        max_fps: c.max_fps.filter(|v| CHOICES_MAX_FPS.contains(v)),
+        bitrate: c
+            .bitrate
+            .filter(|v| QUALITY_PRESETS.iter().any(|(b, _)| b == v)),
+        capture_scale: c
+            .capture_scale
+            .filter(|v| CHOICES_CAPTURE_SCALE.contains(v)),
+        prioritize_speed: c.prioritize_speed,
+        virtual_display: c
+            .virtual_display
+            .filter(|v| !*v || virtual_display_available),
+        direct_wireless: c.direct_wireless,
     }
 }
 
@@ -792,8 +819,15 @@ async fn session_inner(io: BoxIo, shared: &Arc<Shared>) {
                     continue;
                 };
                 shared.emit(MockEvent::ChangeSettings(c.clone()));
+                if shared.cfg.settings_silent {
+                    continue;
+                }
                 if let Some(s) = settings.as_mut() {
-                    s.settings = c.applied_to(&s.settings);
+                    let mut ok = accepted(&c, s.virtual_display_available);
+                    if s.settings.direct_wireless.is_none() {
+                        ok.direct_wireless = None;
+                    }
+                    s.settings = ok.applied_to(&s.settings);
                     s.answering = c.token;
                     send(kind::HOST_SETTINGS, &to_json(&*s));
                     s.answering = None;

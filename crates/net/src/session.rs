@@ -72,8 +72,11 @@ pub enum SessionEvent {
         info: MacInfo,
         fingerprint: [u8; 32],
     },
+    /// The last second's numbers. Round trips are in ms, `None` when no pong came: the median
+    /// and the worst.
     Stats {
         rtt_ms: Option<f64>,
+        rtt_max_ms: Option<f64>,
         fps: u32,
     },
     /// The session ended and the supervisor retries after `retry_in`. `text` is the CLI's line.
@@ -670,7 +673,11 @@ pub async fn run_session(
                     rtt_max_ms: Some(ms(rtt_max)),
                 };
                 send(kind::CLIENT_STATS, &to_json(&stats));
-                out.emit(SessionEvent::Stats { rtt_ms: rtt_med, fps });
+                out.emit(SessionEvent::Stats {
+                    rtt_ms: rtt_med,
+                    rtt_max_ms: rtt_max,
+                    fps,
+                });
             }
         }
     }

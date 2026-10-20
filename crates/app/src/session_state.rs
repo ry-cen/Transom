@@ -10,7 +10,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use transom_net::session::{EndKind, SessionEvent};
-use transom_proto::host_settings::HostSettingsState;
+use transom_proto::host_settings::{pick_timeout, HostSettingsState, SettingsLedger};
 use transom_proto::messages::{AppInfo, MacInfo, StreamSource, WindowInfo};
 
 /// At most this many app icons are kept; later new bundle IDs are dropped (about 100 arrive at
@@ -61,8 +61,17 @@ pub struct SessionState {
     /// By bundle ID; kept across reconnects.
     pub icons: HashMap<String, Arc<[u8]>>,
     pub host_settings: Option<HostSettingsState>,
+    /// This connection's Mac settings with this device's unanswered picks; reset when the
+    /// connection ends.
+    pub settings: SettingsLedger,
+    /// Answers that refused at least one pick, ever; never reset.
+    pub settings_refusals: u64,
     pub mac_info: Option<(MacInfo, [u8; 32])>,
     pub rtt_ms: Option<f64>,
+    /// The worst round trip of the last second that measured one, ms. Kept across seconds
+    /// without one; None until measured and after the connection ends (the settings pick
+    /// timeout).
+    pub rtt_max_ms: Option<f64>,
     pub fps: u32,
     pub connected_at: Option<Instant>,
     pub first_frame_at: Option<Instant>,
@@ -84,8 +93,11 @@ impl SessionState {
             thumbnails: HashMap::new(),
             icons: HashMap::new(),
             host_settings: None,
+            settings: SettingsLedger::default(),
+            settings_refusals: 0,
             mac_info: None,
             rtt_ms: None,
+            rtt_max_ms: None,
             fps: 0,
             connected_at: None,
             first_frame_at: None,
@@ -190,14 +202,26 @@ impl SessionState {
                         ),
                     }
                 }
+                let refused = self.settings.receive(s.clone());
+                if !refused.is_empty() {
+                    self.settings_refusals += 1;
+                    log::info!("settings: the Mac kept its value for {refused:?}");
+                }
                 self.host_settings = Some(s);
             }
             SessionEvent::CursorShape(_) => {}
             SessionEvent::MacInfo { info, fingerprint } => {
                 self.mac_info = Some((info, fingerprint));
             }
-            SessionEvent::Stats { rtt_ms, fps } => {
+            SessionEvent::Stats {
+                rtt_ms,
+                rtt_max_ms,
+                fps,
+            } => {
                 self.rtt_ms = rtt_ms;
+                if rtt_max_ms.is_some() {
+                    self.rtt_max_ms = rtt_max_ms;
+                }
                 self.fps = fps;
             }
             SessionEvent::Ended {
@@ -227,6 +251,11 @@ impl SessionState {
         }
     }
 
+    /// How long a pick may stay unanswered (`pick_timeout` of the worst round trip).
+    pub fn settings_timeout(&self) -> Duration {
+        pick_timeout(self.rtt_max_ms)
+    }
+
     /// The first decoded frame of this connection was shown.
     pub fn frame_shown(&mut self, now: Instant) {
         if self.is_connected() && self.first_frame_at.is_none() {
@@ -252,7 +281,9 @@ impl SessionState {
         self.active = StreamSource::None {};
         self.thumbnails.clear();
         self.host_settings = None;
+        self.settings.reset();
         self.rtt_ms = None;
+        self.rtt_max_ms = None;
         self.fps = 0;
         self.connected_at = None;
         self.first_frame_at = None;
@@ -311,6 +342,7 @@ impl SessionState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use transom_proto::host_settings::{HostSettingsChange, StreamSettings};
     use transom_proto::messages::WindowList;
 
     fn win(id: u32, title: &str) -> WindowInfo {
@@ -466,6 +498,39 @@ mod tests {
     }
 
     #[test]
+    fn worst_rtt_is_kept_across_seconds_without_one() {
+        let now = Instant::now();
+        let mut s = connected_state(now);
+        s.apply(
+            SessionEvent::Stats {
+                rtt_ms: Some(20.0),
+                rtt_max_ms: Some(40.0),
+                fps: 60,
+            },
+            now,
+        );
+        s.apply(
+            SessionEvent::Stats {
+                rtt_ms: None,
+                rtt_max_ms: None,
+                fps: 60,
+            },
+            now,
+        );
+        assert_eq!(s.rtt_max_ms, Some(40.0));
+        assert_eq!(s.rtt_ms, None);
+        s.apply(
+            SessionEvent::Ended {
+                text: "x".into(),
+                retry_in: None,
+                kind: EndKind::Lost,
+            },
+            now,
+        );
+        assert_eq!(s.rtt_max_ms, None);
+    }
+
+    #[test]
     fn ended_clears_connection_and_keeps_icons_and_apps() {
         let now = Instant::now();
         let mut s = connected_state(now);
@@ -493,6 +558,7 @@ mod tests {
         s.apply(
             SessionEvent::Stats {
                 rtt_ms: Some(12.0),
+                rtt_max_ms: Some(30.0),
                 fps: 60,
             },
             now,
@@ -572,6 +638,7 @@ mod tests {
         s.apply(
             SessionEvent::Stats {
                 rtt_ms: Some(17.6),
+                rtt_max_ms: Some(40.0),
                 fps: 60,
             },
             now,
@@ -606,5 +673,82 @@ mod tests {
         assert_eq!(s.next_window(), Some(101));
         s.apply(list(vec![], StreamSource::Desktop {}), now);
         assert_eq!(s.next_window(), None);
+    }
+
+    fn hs(max_fps: i64, bitrate: i64, answering: Option<i64>) -> HostSettingsState {
+        HostSettingsState {
+            settings: StreamSettings {
+                max_fps,
+                bitrate,
+                capture_scale: 2.0,
+                prioritize_speed: false,
+                virtual_display: false,
+                direct_wireless: None,
+            },
+            persistent: true,
+            virtual_display_available: false,
+            virtual_display_note: None,
+            software_encoder: false,
+            stream: None,
+            answering,
+            away: None,
+            link: None,
+        }
+    }
+
+    fn pick(max_fps: Option<i64>, bitrate: Option<i64>, token: i64) -> HostSettingsChange {
+        HostSettingsChange {
+            token: Some(token),
+            max_fps,
+            bitrate,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn host_settings_feed_the_ledger() {
+        let now = Instant::now();
+        let mut s = connected_state(now);
+        assert!(s.settings.host().is_none());
+        s.apply(SessionEvent::HostSettings(hs(60, 15_000_000, Some(4))), now);
+        let h = s.settings.host().expect("the ledger has the state");
+        assert_eq!(h.answering, None);
+        assert_eq!(h.settings.max_fps, 60);
+        assert_eq!(s.host_settings.as_ref().unwrap().answering, Some(4));
+    }
+
+    #[test]
+    fn refusing_answer_counts_once() {
+        let now = Instant::now();
+        let mut s = connected_state(now);
+        s.apply(SessionEvent::HostSettings(hs(60, 15_000_000, None)), now);
+        let out = s
+            .settings
+            .pick(&pick(Some(120), Some(25_000_000), 1), 1, now)
+            .expect("two fields differ");
+        assert_eq!(out.token, Some(1));
+        s.apply(SessionEvent::HostSettings(hs(60, 15_000_000, Some(1))), now);
+        assert_eq!(s.settings_refusals, 1);
+        assert!(s.settings.pending().is_empty());
+        s.apply(SessionEvent::HostSettings(hs(60, 15_000_000, None)), now);
+        assert_eq!(s.settings_refusals, 1);
+    }
+
+    #[test]
+    fn ended_resets_the_ledger() {
+        let now = Instant::now();
+        let mut s = connected_state(now);
+        s.apply(SessionEvent::HostSettings(hs(60, 15_000_000, None)), now);
+        s.settings.pick(&pick(Some(120), None, 1), 1, now);
+        s.apply(SessionEvent::HostSettings(hs(60, 15_000_000, Some(9))), now);
+        s.apply(
+            SessionEvent::Ended {
+                text: "x".into(),
+                retry_in: Some(Duration::from_secs(1)),
+                kind: EndKind::Lost,
+            },
+            now,
+        );
+        assert_eq!(s.settings, SettingsLedger::default());
     }
 }

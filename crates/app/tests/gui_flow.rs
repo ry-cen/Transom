@@ -9,10 +9,12 @@ use std::time::{Duration, Instant};
 use tokio::runtime::Handle;
 use transom_app::gui::effects::{Effects, Platform};
 use transom_app::gui::model::{AddField, Card, IdentityInfo, Model, Msg, Prefs, Screen};
+use transom_app::gui::texts;
 use transom_app::session_state::Phase;
 use transom_app::stream::Wake;
 use transom_net::mock::{MockConfig, MockEvent, MockHost};
 use transom_net::store::Store;
+use transom_proto::host_settings::{HostSettingsChange, HostSettingsState, StreamSettings};
 use transom_proto::identity::{b64url_encode, mac_id};
 use transom_proto::messages::StreamSource;
 
@@ -206,5 +208,111 @@ async fn wrong_code_shows_tries_left() {
     };
     let text = &a.problem.as_ref().unwrap().1;
     assert!(text.contains("2 tries left"), "got: {text}");
+    r.finish();
+}
+
+fn settings_config(silent: bool) -> MockConfig {
+    MockConfig {
+        host_settings: Some(HostSettingsState {
+            settings: StreamSettings {
+                max_fps: 60,
+                bitrate: 15_000_000,
+                capture_scale: 2.0,
+                prioritize_speed: false,
+                virtual_display: false,
+                direct_wireless: None,
+            },
+            persistent: true,
+            virtual_display_available: false,
+            virtual_display_note: None,
+            software_encoder: false,
+            stream: None,
+            answering: None,
+            away: None,
+            link: None,
+        }),
+        settings_silent: silent,
+        ..MockConfig::default()
+    }
+}
+
+fn has_settings(m: &Model) -> bool {
+    m.stream()
+        .is_some_and(|s| s.session.settings.host().is_some())
+}
+
+fn no_pending(m: &Model) -> bool {
+    m.stream()
+        .is_some_and(|s| s.session.settings.pending().is_empty())
+}
+
+fn shown_fps(m: &Model) -> i64 {
+    m.stream()
+        .unwrap()
+        .session
+        .settings
+        .displayed()
+        .unwrap()
+        .max_fps
+}
+
+fn pick_fps(v: i64) -> Msg {
+    Msg::ChangeSettings(HostSettingsChange {
+        max_fps: Some(v),
+        ..Default::default()
+    })
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn settings_pick_is_answered_and_shown() {
+    let host = MockHost::start(settings_config(false)).await.unwrap();
+    let mut r = rig();
+    r.add_and_connect(&host, CODE).await;
+    assert!(r.pump(has_settings, Duration::from_secs(5)).await);
+    r.send(pick_fps(120));
+    let seen = next_mock_event(&host, Duration::from_secs(5), |e| {
+        matches!(e, MockEvent::ChangeSettings(c) if c.max_fps == Some(120) && c.token.is_some())
+    })
+    .await;
+    assert!(seen.is_some(), "the mock did not see the change");
+    assert!(r.pump(no_pending, Duration::from_secs(5)).await);
+    assert_eq!(shown_fps(&r.model), 120);
+    r.finish();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn out_of_choice_pick_is_refused_with_toast() {
+    let host = MockHost::start(settings_config(false)).await.unwrap();
+    let mut r = rig();
+    r.add_and_connect(&host, CODE).await;
+    assert!(r.pump(has_settings, Duration::from_secs(5)).await);
+    r.send(pick_fps(90));
+    assert!(r.pump(no_pending, Duration::from_secs(5)).await);
+    assert_eq!(shown_fps(&r.model), 60);
+    let name = r.model.stream().unwrap().session.mac_name.clone();
+    let want = texts::kept_setting(&name);
+    assert!(
+        r.model.toasts.iter().any(|t| t.text == want),
+        "no SET18 toast: {:?}",
+        r.model.toasts
+    );
+    r.finish();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unanswered_pick_reverts() {
+    let host = MockHost::start(settings_config(true)).await.unwrap();
+    let mut r = rig();
+    r.add_and_connect(&host, CODE).await;
+    assert!(r.pump(has_settings, Duration::from_secs(5)).await);
+    let t0 = Instant::now();
+    r.send(pick_fps(120));
+    assert_eq!(shown_fps(&r.model), 120);
+    assert!(r.pump(no_pending, Duration::from_secs(8)).await);
+    assert!(t0.elapsed() >= Duration::from_secs(4));
+    assert_eq!(shown_fps(&r.model), 60);
+    let name = r.model.stream().unwrap().session.mac_name.clone();
+    let kept = texts::kept_setting(&name);
+    assert!(r.model.toasts.iter().all(|t| t.text != kept));
     r.finish();
 }

@@ -648,6 +648,11 @@ pub fn virtual_display_note(mac: &str) -> String {
     format!("The window you pick moves onto an invisible display on {} while it streams, so it keeps updating when covered.", mac_name(mac))
 }
 
+/// SET15's footnote when the Mac gives its own note (virtualDisplayNote), sanitised.
+pub fn mac_note(note: &str) -> String {
+    label(note, 300)
+}
+
 /// SET17: under the Streaming group.
 pub fn applies_to_every_device(mac: &str) -> String {
     format!(
