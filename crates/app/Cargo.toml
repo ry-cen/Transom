@@ -34,6 +34,7 @@ gui = [
     "dep:image",
     "dep:serde",
     "dep:serde_json",
+    "dep:windows-sys",
 ]
 
 [dependencies]
@@ -55,6 +56,10 @@ egui-wgpu = { workspace = true, optional = true }
 image = { workspace = true, optional = true }
 serde = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }
+
+# The full-screen keyboard hook of the graphical app (src/gui/winhook.rs).
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, optional = true }
 
 [dev-dependencies]
 egui_kittest.workspace = true
