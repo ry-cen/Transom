@@ -19,8 +19,29 @@ pub struct Cli {
     /// Log more: -v for info, -vv for debug.
     #[arg(short, long, global = true, action = clap::ArgAction::Count)]
     pub verbose: u8,
+    /// None: open the graphical app (in a build with the `gui` feature), else print help.
     #[command(subcommand)]
-    pub command: Command,
+    pub command: Option<Command>,
+}
+
+/// `transom-gui`'s command line: the graphical app only.
+#[cfg(feature = "gui")]
+#[derive(Parser, Debug)]
+#[command(
+    name = "transom-gui",
+    version,
+    about = "View and control a Mac running Sill from Linux, Windows or macOS."
+)]
+pub struct GuiCli {
+    /// Use this folder for the device key, the saved Macs and the preferences.
+    #[arg(long, value_name = "DIR")]
+    pub config_dir: Option<PathBuf>,
+    /// Log more: -v for info, -vv for debug.
+    #[arg(short, long, action = clap::ArgAction::Count)]
+    pub verbose: u8,
+    /// A sill://pair link to open (handled from Phase 3; ignored before).
+    #[arg(value_name = "LINK")]
+    pub link: Option<String>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -178,5 +199,27 @@ mod tests {
     fn cli_definition_is_valid() {
         use clap::CommandFactory;
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn no_subcommand_parses() {
+        let c = Cli::try_parse_from(["transom"]).unwrap();
+        assert!(c.command.is_none());
+        let c = Cli::try_parse_from(["transom", "-v", "--config-dir", "/tmp/x"]).unwrap();
+        assert!(c.command.is_none());
+        assert_eq!(c.verbose, 1);
+        let c = Cli::try_parse_from(["transom", "list"]).unwrap();
+        assert!(matches!(c.command, Some(Command::List)));
+    }
+
+    #[cfg(feature = "gui")]
+    #[test]
+    fn gui_cli_parses() {
+        use clap::CommandFactory;
+        GuiCli::command().debug_assert();
+        let g = GuiCli::try_parse_from(["transom-gui", "-vv", "sill://pair?x"]).unwrap();
+        assert_eq!(g.verbose, 2);
+        assert_eq!(g.link.as_deref(), Some("sill://pair?x"));
+        assert!(GuiCli::try_parse_from(["transom-gui", "list", "extra"]).is_err());
     }
 }

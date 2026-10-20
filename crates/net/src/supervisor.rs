@@ -4,7 +4,7 @@
 use crate::dial::{dial, resolve, HOME_DIAL_TIMEOUT, REMOTE_DIAL_TIMEOUT};
 use crate::discovery::{browse_until, recognize};
 use crate::identity::DeviceIdentity;
-use crate::session::{run_session, Outputs, SessionCommand, SessionEnd, SessionEvent};
+use crate::session::{run_session, EndKind, Outputs, SessionCommand, SessionEnd, SessionEvent};
 use crate::session::{SessionOptions, SourceChoice};
 use crate::store::{SavedAddress, SavedMac, Store};
 use crate::tls::{self, PinPolicy, SESSION_ALPN};
@@ -21,6 +21,28 @@ use transom_proto::safetext;
 pub enum Endpoint {
     Host(String, u16),
     Addrs(Vec<SocketAddr>),
+    /// Several hosts, tried in order: each is resolved, and the addresses of all of them are
+    /// dialed in that order. A host that does not resolve is skipped.
+    Hosts(Vec<(String, u16)>),
+}
+
+/// The addresses of every host that resolves, in order; the first error when none does.
+async fn resolve_hosts(hosts: &[(String, u16)]) -> Result<Vec<SocketAddr>, NetError> {
+    let mut all = Vec::new();
+    let mut first_err = None;
+    for (host, port) in hosts {
+        match resolve(host, *port).await {
+            Ok(addrs) => all.extend(addrs),
+            Err(e) => {
+                log::debug!("{host}: {e}");
+                first_err.get_or_insert(e);
+            }
+        }
+    }
+    if all.is_empty() {
+        return Err(first_err.unwrap_or_else(|| NetError::Connect("no address to dial".into())));
+    }
+    Ok(all)
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -148,6 +170,7 @@ pub async fn open(
             let addrs = match endpoint {
                 Endpoint::Host(host, port) => resolve(host, *port).await?,
                 Endpoint::Addrs(a) => a.clone(),
+                Endpoint::Hosts(hosts) => resolve_hosts(hosts).await?,
             };
             let (tcp, peer) = dial(&addrs, per_attempt).await?;
             match trust {
@@ -285,13 +308,13 @@ async fn supervise(
         else {
             return;
         };
-        let backoff_text: String = match opened {
+        let (backoff_text, backoff_kind): (String, EndKind) = match opened {
             Err(e) => match terminal_text(&e, &label) {
-                Some(text) => {
-                    out.emit(SessionEvent::Finished { text });
+                Some((text, kind)) => {
+                    out.emit(SessionEvent::Finished { text, kind });
                     return;
                 }
-                None => e.to_string(),
+                None => (e.to_string(), EndKind::ConnectFailed),
             },
             Ok((io, peer, fp, label)) => {
                 let end = {
@@ -314,23 +337,24 @@ async fn supervise(
                             goodbye.reason.as_str(),
                             goodbye_reason::REMOTE_OFF | goodbye_reason::INTERNET_OFF
                         );
+                        let kind = EndKind::from_goodbye(&goodbye);
                         if !o.reconnect || (route.is_remote() && remote_off) {
-                            out.emit(SessionEvent::Finished { text: o.text });
+                            out.emit(SessionEvent::Finished { text: o.text, kind });
                             return;
                         }
-                        o.text
+                        (o.text, kind)
                     }
                     SessionEnd::Lost { error, admitted } => {
                         if admitted {
                             attempt = 0;
                         }
                         match terminal_text(&error, &label) {
-                            Some(text) => {
-                                out.emit(SessionEvent::Finished { text });
+                            Some((text, kind)) => {
+                                out.emit(SessionEvent::Finished { text, kind });
                                 return;
                             }
-                            None if admitted => goodbye_outcome(None, &label).text,
-                            None => error.to_string(),
+                            None if admitted => (goodbye_outcome(None, &label).text, EndKind::Lost),
+                            None => (error.to_string(), EndKind::ConnectFailed),
                         }
                     }
                 }
@@ -341,6 +365,7 @@ async fn supervise(
         out.emit(SessionEvent::Ended {
             text: backoff_text,
             retry_in: Some(delay),
+            kind: backoff_kind,
         });
         if while_idle(tokio::time::sleep(delay), &mut cmds, &mut options)
             .await
@@ -351,14 +376,18 @@ async fn supervise(
     }
 }
 
-/// The final message for errors that reconnecting cannot fix.
-fn terminal_text(e: &NetError, label: &str) -> Option<String> {
+/// The final message (the CLI's) and kind for errors that reconnecting cannot fix.
+fn terminal_text(e: &NetError, label: &str) -> Option<(String, EndKind)> {
     match e {
-        NetError::NotPaired => Some(format!(
-            "{label} does not know this computer. Pair it first: transom pair"
+        NetError::NotPaired => Some((
+            format!("{label} does not know this computer. Pair it first: transom pair"),
+            EndKind::NotPaired,
         )),
-        NetError::PinMismatch => Some(format!(
-            "{label} presented a different key from the one saved. If the Mac was reset, run transom forget and pair again."
+        NetError::PinMismatch => Some((
+            format!(
+                "{label} presented a different key from the one saved. If the Mac was reset, run transom forget and pair again."
+            ),
+            EndKind::PinMismatch,
         )),
         _ => None,
     }

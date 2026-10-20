@@ -54,6 +54,8 @@ struct MacsFile {
 
 use serde::{Deserialize, Serialize};
 
+/// A handle on the config folder. Cloning it gives another handle on the same folder.
+#[derive(Clone, Debug)]
 pub struct Store {
     dir: PathBuf,
 }
@@ -203,6 +205,46 @@ impl Store {
         }
         Ok(None)
     }
+
+    /// A small named file in the config folder (the GUI's `prefs.json`); None when missing.
+    pub fn read_file(&self, name: &str) -> Result<Option<Vec<u8>>, NetError> {
+        let path = self.dir.join(checked_name(name)?);
+        match std::fs::read(&path) {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(store_err(e)),
+        }
+    }
+
+    /// Writes a small named file in the config folder: atomically, mode 0600 on unix.
+    pub fn write_file(&self, name: &str, data: &[u8]) -> Result<(), NetError> {
+        let path = self.dir.join(checked_name(name)?);
+        write_atomic(&path, data)
+    }
+}
+
+/// Files `read_file` and `write_file` never touch: they have their own methods.
+const RESERVED_FILES: [&str; 2] = ["device-key.pem", "macs.json"];
+
+/// `name` when it matches `^[a-z0-9][a-z0-9._-]*$`, is at most 64 bytes, does not end in ".tmp"
+/// (`write_atomic`'s temporary) and is not reserved; else "bad file name".
+fn checked_name(name: &str) -> Result<&str, NetError> {
+    let bytes = name.as_bytes();
+    let ok_first = bytes
+        .first()
+        .is_some_and(|b| b.is_ascii_lowercase() || b.is_ascii_digit());
+    let ok_rest = bytes
+        .iter()
+        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'.' | b'_' | b'-'));
+    if !ok_first
+        || !ok_rest
+        || bytes.len() > 64
+        || name.ends_with(".tmp")
+        || RESERVED_FILES.contains(&name)
+    {
+        return Err(NetError::Store("bad file name".into()));
+    }
+    Ok(name)
 }
 
 /// A Mac name as `find` compares it: trimmed, lowercased, and with curly apostrophes made
@@ -323,6 +365,56 @@ mod tests {
         assert_eq!(mode(&dir), 0o700);
         assert_eq!(mode(&dir.join("device-key.pem")), 0o600);
         assert_eq!(mode(&dir.join("macs.json")), 0o600);
+        store.write_file("prefs.json", b"{}").unwrap();
+        assert_eq!(mode(&dir.join("prefs.json")), 0o600);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn named_files_round_trip() {
+        let dir = temp_dir();
+        let store = Store::open(Some(dir.clone())).unwrap();
+        assert_eq!(store.read_file("prefs.json").unwrap(), None);
+        store.write_file("prefs.json", b"{\"version\":1}").unwrap();
+        assert_eq!(
+            store.read_file("prefs.json").unwrap().as_deref(),
+            Some(&b"{\"version\":1}"[..])
+        );
+        store.write_file("prefs.json", b"{}").unwrap();
+        assert_eq!(
+            store.read_file("prefs.json").unwrap().as_deref(),
+            Some(&b"{}"[..])
+        );
+        assert!(!dir.join("prefs.json.tmp").exists());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn bad_file_names_are_refused() {
+        let dir = temp_dir();
+        let store = Store::open(Some(dir.clone())).unwrap();
+        for bad in [
+            "",
+            "../x",
+            "a/b",
+            "a\\b",
+            ".hidden",
+            "-x",
+            "Prefs.json",
+            "x.tmp",
+            "macs.json",
+            "device-key.pem",
+            "caf\u{e9}.json",
+            &"a".repeat(65),
+        ] {
+            assert!(
+                matches!(store.write_file(bad, b"x"), Err(NetError::Store(ref m)) if m == "bad file name"),
+                "{bad:?}"
+            );
+            assert!(store.read_file(bad).is_err(), "{bad:?}");
+        }
+        assert!(store.write_file("crash.log", b"x").is_ok());
+        assert!(store.write_file("0-a_b.c", b"x").is_ok());
         let _ = std::fs::remove_dir_all(dir);
     }
 }

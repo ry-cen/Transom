@@ -123,6 +123,56 @@ pub fn browse_until(
     Ok(hit)
 }
 
+/// One change seen by a live browse (`watch`).
+#[derive(Clone, Debug)]
+pub enum BrowseEvent {
+    /// A Mac resolved, or resolved again (same `fullname`: replace the earlier entry).
+    Found(FoundMac),
+    /// The Mac with this `fullname` left the network.
+    Removed { fullname: String },
+}
+
+/// A live browse of `_sill._tcp`, for the app's lifetime. Stopping it (or dropping it) shuts its
+/// mDNS daemon down and joins its reader thread.
+pub struct Watch {
+    daemon: Option<ServiceDaemon>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+/// Browses `_sill._tcp` until stopped. Every resolution is sent as `Found` and every removal as
+/// `Removed`, each followed by `wake()`.
+///
+/// Not built yet (WP-B1): returns an error and starts nothing.
+pub fn watch(
+    out: crossbeam_channel::Sender<BrowseEvent>,
+    wake: std::sync::Arc<dyn Fn() + Send + Sync>,
+) -> Result<Watch, NetError> {
+    let _ = (out, wake);
+    Err(NetError::Connect("discovery watch is not built yet".into()))
+}
+
+impl Watch {
+    /// Shuts the daemon down and joins the reader thread.
+    pub fn stop(mut self) {
+        self.shut_down();
+    }
+
+    fn shut_down(&mut self) {
+        if let Some(daemon) = self.daemon.take() {
+            let _ = daemon.shutdown();
+        }
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+impl Drop for Watch {
+    fn drop(&mut self) {
+        self.shut_down();
+    }
+}
+
 /// The saved Mac whose recognition key matches `found.tag`.
 pub fn recognize<'a>(found: &FoundMac, saved: &'a [SavedMac]) -> Option<&'a SavedMac> {
     let tag = found.tag.as_deref()?;

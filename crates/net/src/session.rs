@@ -14,6 +14,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 use transom_proto::blobs::CursorShape;
+use transom_proto::host_settings::{HostSettingsChange, HostSettingsState};
 use transom_proto::messages::{
     decode_goodbye, from_json, to_json, AppInfo, ClientStats, Goodbye, Hello, InputEvent, MacInfo,
     PointerAction, SignedMacInfo, StreamSource, Viewport, WindowCommand, WindowList,
@@ -54,6 +55,18 @@ pub enum SessionEvent {
     },
     WindowList(WindowList),
     AppList(Vec<AppInfo>),
+    /// Kind 3 (blobs::decode_thumbnail): a window's picture, JPEG bytes not yet decoded.
+    Thumbnail {
+        id: u32,
+        jpeg: Vec<u8>,
+    },
+    /// Kind 4 (blobs::decode_icon): an app's icon, PNG bytes not yet decoded.
+    AppIcon {
+        bundle_id: String,
+        png: Vec<u8>,
+    },
+    /// Kind 16: the Mac's settings, on connect, on change, and as the answer to a change.
+    HostSettings(HostSettingsState),
     CursorShape(CursorShape),
     MacInfo {
         info: MacInfo,
@@ -63,13 +76,47 @@ pub enum SessionEvent {
         rtt_ms: Option<f64>,
         fps: u32,
     },
+    /// The session ended and the supervisor retries after `retry_in`. `text` is the CLI's line.
     Ended {
         text: String,
         retry_in: Option<Duration>,
+        kind: EndKind,
     },
+    /// The supervisor stopped for good. `text` is the CLI's line.
     Finished {
         text: String,
+        kind: EndKind,
     },
+}
+
+/// Why a session ended, for a UI that words it itself (docs/ui-spec.md section 5.8).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum EndKind {
+    /// Before admission: not found on the network, dial or TLS failed.
+    ConnectFailed,
+    /// An admitted session dropped without a goodbye.
+    Lost,
+    /// The Mac's goodbye. `reason` is the raw string (`goodbye_reason::*` or anything else).
+    Goodbye {
+        reason: String,
+        message: Option<String>,
+        minimum_version: Option<String>,
+    },
+    /// The Mac does not know this computer's key.
+    NotPaired,
+    /// The Mac presented a different key from the one pinned.
+    PinMismatch,
+}
+
+impl EndKind {
+    /// The kind for the Mac's goodbye.
+    pub fn from_goodbye(g: &Goodbye) -> EndKind {
+        EndKind::Goodbye {
+            reason: g.reason.clone(),
+            message: g.message.clone(),
+            minimum_version: g.minimum_version.clone(),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -79,6 +126,10 @@ pub enum SessionCommand {
     Input(InputEvent),
     LaunchApp(String),
     WindowCommand(WindowCommand),
+    /// Kind 17. Dropped (not queued) while no session runs.
+    ChangeSettings(HostSettingsChange),
+    /// Ends a reconnect backoff wait now; ignored at any other time.
+    RetryNow,
     Close,
 }
 
@@ -545,6 +596,9 @@ pub async fn run_session(
                         );
                     }
                     SessionCommand::WindowCommand(c) => send(kind::WINDOW_COMMAND, &to_json(&c)),
+                    // WP-B1 sends kind 17 here.
+                    SessionCommand::ChangeSettings(_) => {}
+                    SessionCommand::RetryNow => {}
                     SessionCommand::Close => {
                         drain_writer(&mut writer, &wtx).await;
                         return SessionEnd::UserClosed;

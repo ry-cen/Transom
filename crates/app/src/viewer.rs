@@ -296,7 +296,7 @@ impl Viewer {
                     self.rtt = rtt_ms;
                     self.fps = fps;
                 }
-                SessionEvent::Ended { text, retry_in } => {
+                SessionEvent::Ended { text, retry_in, .. } => {
                     self.connected = false;
                     self.status = match retry_in {
                         Some(d) => {
@@ -315,12 +315,16 @@ impl Viewer {
                         w.request_redraw();
                     }
                 }
-                SessionEvent::Finished { text } => {
+                SessionEvent::Finished { text, .. } => {
                     eprintln!("{}", transom_proto::safetext::label(&text, 300));
                     self.exit_code = 1;
                     el.exit();
                 }
-                SessionEvent::MacInfo { .. } | SessionEvent::AppList(_) => {}
+                SessionEvent::MacInfo { .. }
+                | SessionEvent::AppList(_)
+                | SessionEvent::Thumbnail { .. }
+                | SessionEvent::AppIcon { .. }
+                | SessionEvent::HostSettings(_) => {}
             }
         }
         self.update_title();

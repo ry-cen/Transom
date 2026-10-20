@@ -254,7 +254,7 @@ async fn unpaired_key_is_not_paired() {
     })
     .await;
     match finished {
-        Some(SessionEvent::Finished { text }) => {
+        Some(SessionEvent::Finished { text, .. }) => {
             assert!(text.contains("Pair it first"), "{text}")
         }
         other => panic!("unexpected: {other:?}"),
@@ -323,7 +323,7 @@ async fn unpaired_client_writes_nothing_before_the_alert() {
     })
     .await;
     match finished {
-        Some(SessionEvent::Finished { text }) => {
+        Some(SessionEvent::Finished { text, .. }) => {
             assert!(text.contains("Pair it first"), "{text}")
         }
         other => panic!("unexpected: {other:?}"),
@@ -498,7 +498,7 @@ async fn goodbye_removed_finishes() {
     })
     .await;
     match finished {
-        Some(SessionEvent::Finished { text }) => assert!(text.contains("removed"), "{text}"),
+        Some(SessionEvent::Finished { text, .. }) => assert!(text.contains("removed"), "{text}"),
         other => panic!("unexpected: {other:?}"),
     }
 }
