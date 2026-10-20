@@ -615,6 +615,66 @@ fn full_screen_can_be_left_from_the_macs_list() {
     assert_eq!(toggles(&h), 0, "{:?}", h.state().out);
 }
 
+/// The Mac settings panel shows what the Mac runs, and the software encoder in the error colour.
+#[test]
+fn mac_settings_shows_the_running_stream() {
+    let now = Instant::now();
+    let mut m = stream_model(now, false);
+    let hs = serde_json::from_str(
+        r#"{"settings": {"maxFPS": 120, "bitrate": 15000000, "captureScale": 2,
+            "prioritizeSpeed": false, "virtualDisplay": false},
+          "persistent": true, "virtualDisplayAvailable": false, "softwareEncoder": true,
+          "stream": {"width": 5120, "height": 2880, "fps": 120, "mbps": 30,
+            "onVirtualDisplay": false}}"#,
+    )
+    .unwrap();
+    let s = m.stream_mut().unwrap();
+    s.session.apply(SessionEvent::HostSettings(hs), now);
+    s.panel = Some(StreamPanel::MacSettings);
+    let h = start(m, now);
+    h.get_by_label("The Mac encodes 5120×2880 at up to 120 fps, 30 Mbps.");
+    h.get_by_label(texts::SOFTWARE_ENCODER);
+
+    let mut m = stream_model(now, false);
+    m.stream_mut().unwrap().panel = Some(StreamPanel::MacSettings);
+    let h = start(m, now);
+    h.get_by_label(texts::STREAM_NONE);
+    assert!(h.query_by_label(texts::SOFTWARE_ENCODER).is_none());
+}
+
+/// The bar shows Sill's link report while the Mac says the link is behind, and nothing else.
+#[test]
+fn bar_shows_the_link_report_while_behind() {
+    let now = Instant::now();
+    let with_link = |link: &str| {
+        let mut m = stream_model(now, false);
+        let json = format!(
+            r#"{{"settings": {{"maxFPS": 120, "bitrate": 15000000, "captureScale": 2,
+                "prioritizeSpeed": false, "virtualDisplay": false}},
+              "persistent": true, "virtualDisplayAvailable": false, "softwareEncoder": false
+              {link}}}"#
+        );
+        let hs = serde_json::from_str(&json).unwrap();
+        let s = m.stream_mut().unwrap();
+        s.session.apply(SessionEvent::HostSettings(hs), now);
+        s.bar.pinned = true;
+        m
+    };
+    let behind = r#", "link": {"state": "behind", "withheldPerSecond": 23, "bitrate": 15000000,
+        "carriedKbps": 9500, "suggestedBitrate": 8000000, "suggestedCaptureScale": 1}"#;
+    let h = start(with_link(behind), now);
+    h.get_by_label(&texts::link_chip(23));
+
+    for other in [
+        "",
+        r#", "link": {"state": "stalled", "withheldPerSecond": 5, "bitrate": 15000000}"#,
+    ] {
+        let h = start(with_link(other), now);
+        assert!(h.query_by_label(&texts::link_chip(5)).is_none());
+        assert!(h.query_by_label(&texts::link_chip(23)).is_none());
+    }
+}
+
 #[test]
 fn every_dialog_and_card_renders_with_default_fonts() {
     let now = Instant::now();
