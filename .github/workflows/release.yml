@@ -61,7 +61,7 @@ jobs:
           code-signed. Choose "More info", then "Run anyway".
 
           This package includes FFmpeg ($env:FFMPEG_NAME, https://ffmpeg.org), licensed under
-          the GNU LGPL version 2.1 or later; see licenses\FFmpeg-LICENSE.txt. FFmpeg's source
+          the GNU LGPL version 3 or later; see licenses\FFmpeg-LICENSE.txt. FFmpeg's source
           is available from https://github.com/BtbN/FFmpeg-Builds and https://ffmpeg.org.
           "@ | Set-Content "$out\READ ME FIRST.txt"
           Compress-Archive -Path $out -DestinationPath "$name.zip"
