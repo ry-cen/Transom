@@ -1,0 +1,18 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: Transom
+Source: https://github.com/ry-cen/Transom
+
+Files: *
+Copyright: 2026 The Transom authors
+License: Apache-2.0
+ Licensed under the Apache License, Version 2.0. On Debian systems the
+ full text is in /usr/share/common-licenses/Apache-2.0, and a copy is in
+ /usr/share/doc/transom/LICENSE. See also NOTICE in the same directory.
+
+Files: usr/lib/transom/*
+Copyright: the FFmpeg developers
+License: LGPL-3+
+ The FFmpeg libraries are licensed under the GNU Lesser General Public
+ License version 3 or later. The licence text is in
+ /usr/share/doc/transom/FFmpeg-LICENSE.txt, and the build and source
+ links are in /usr/share/doc/transom/FFmpeg-NOTICE.txt.

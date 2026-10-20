@@ -1,0 +1,14 @@
+Transom for Linux includes the FFmpeg libraries libavcodec, libavformat,
+libavutil, libswresample and libswscale, unmodified, from
+@FFMPEG_NAME@ (BtbN/FFmpeg-Builds release @FFMPEG_TAG@,
+https://ffmpeg.org).
+
+They are licensed under the GNU Lesser General Public License version 3
+or later; see FFmpeg-LICENSE.txt.
+
+Source: https://github.com/BtbN/FFmpeg-Builds/releases/tag/@FFMPEG_TAG@
+and https://ffmpeg.org/download.html.
+
+The libraries are in /usr/lib/transom (the .deb) or usr/lib/transom
+inside the AppImage, and can be replaced with compatible builds of the
+same versions.

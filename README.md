@@ -28,7 +28,30 @@ double-click `transom-gui.exe`. FFmpeg is included; keep its DLLs next to the pr
 program is not code-signed, so Windows SmartScreen may warn about an unknown publisher: choose
 **More info**, then **Run anyway**.
 
-Linux and macOS: build from source (below) for now.
+**Linux (64-bit x86; Ubuntu 22.04 or newer, Debian 12 or newer):** download one of these from
+the [latest release](https://github.com/ry-cen/Transom/releases/latest).
+
+- `transom-…-linux-amd64.deb` installs Transom like any other app. Run
+  `sudo apt install ./transom-…-linux-amd64.deb` (keep the `./`), then open **Transom** from
+  Activities. `transom` is the command-line version. To remove it: `sudo apt remove transom`.
+- `transom-…-linux-x86_64.AppImage` runs without installing. Make it executable, then start it:
+
+  ```
+  chmod +x transom-*-linux-x86_64.AppImage
+  ./transom-*-linux-x86_64.AppImage
+  ```
+
+  With no arguments it opens the app; with arguments it is the command line (try `--help`).
+  If it reports a FUSE error, install `fuse3` (`sudo apt install fuse3`) or run it with
+  `--appimage-extract-and-run`. An AppImage is not added to the app grid, so GNOME shows a
+  generic icon for its window; use the .deb if you want the Transom icon in the dock.
+
+Both include FFmpeg 9.0's shared libraries, so you do not need to install FFmpeg, and the
+system's FFmpeg is not used. FFmpeg is licensed under the GNU LGPL version 3 or later; its
+licence and a link to its source are in `/usr/share/doc/transom/` (in the AppImage, the same
+path under `usr/`).
+
+macOS: build from source (below) for now.
 
 ## Build from source
 

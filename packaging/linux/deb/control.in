@@ -1,0 +1,14 @@
+Package: transom
+Version: @VERSION@
+Architecture: amd64
+Maintainer: Transom authors <https://github.com/ry-cen/Transom/issues>
+Installed-Size: @INSTALLED_SIZE@
+Depends: libc6 (>= 2.35), libgcc-s1, libwayland-client0, libxkbcommon0, libxkbcommon-x11-0, libx11-6, libx11-xcb1, libxcursor1, libxi6, libxcb1, libvulkan1 | libegl1
+Recommends: mesa-vulkan-drivers | vulkan-icd, xdg-utils
+Section: net
+Priority: optional
+Homepage: https://github.com/ry-cen/Transom
+Description: View and control a Mac running Sill
+ Transom shows a Mac's desktop or one of its windows and sends your mouse,
+ scroll wheel and keyboard back to the Mac, which runs Sill. The package
+ includes private copies of the FFmpeg 9.0 libraries in /usr/lib/transom.
