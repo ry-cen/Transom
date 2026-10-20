@@ -1,0 +1,7 @@
+#!/bin/sh
+# No arguments or a sill:// link: the app. Anything else: the command line.
+HERE="${APPDIR:-$(dirname "$(readlink -f "$0")")}"
+case "${1-}" in
+  "" | sill://*) exec "$HERE/usr/bin/transom-gui" "$@" ;;
+  *) exec "$HERE/usr/bin/transom" "$@" ;;
+esac

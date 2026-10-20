@@ -1,7 +1,9 @@
 name: Release
 
-# Builds a portable Windows zip (Transom plus FFmpeg's LGPL DLLs) and attaches it to a GitHub
-# Release. Push a tag like v0.1.0, or run it by hand to get the zip as a workflow artifact only.
+# Builds three downloads: a portable Windows zip (Transom plus FFmpeg's LGPL DLLs), a Linux
+# AppImage and a Linux .deb (both with a private copy of FFmpeg's shared libraries). Push a tag
+# like v0.1.0 to attach all three to one GitHub Release, or run it by hand to get them as workflow
+# artifacts only.
 on:
   push:
     tags: ["v*"]
@@ -12,7 +14,7 @@ env:
   FFMPEG_NAME: ffmpeg-n9.0-latest-win64-lgpl-shared-9.0
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   windows:
@@ -78,9 +80,140 @@ jobs:
           name: transom-windows-x64
           path: ${{ env.ZIP }}
           if-no-files-found: error
+
+  linux-build:
+    # Built in a 22.04 container (glibc 2.35) so the result runs on 22.04 and newer. The
+    # ubuntu-22.04 runner label is deprecated.
+    runs-on: ubuntu-24.04
+    container: ubuntu:22.04
+    defaults:
+      run:
+        shell: bash
+    outputs:
+      version: ${{ steps.ver.outputs.appver }}
+    env:
+      LINUX_FFMPEG_TAG: autobuild-2026-09-30-13-08
+      LINUX_FFMPEG_NAME: ffmpeg-n9.0.2-17-g2a571b6068-linux64-lgpl-shared-9.0
+      LINUX_FFMPEG_SHA256: 7a1ba2af36e5beeb98151e766a903b1d115f2206a86571f17f873cd7292c424f
+      APPIMAGETOOL_URL: https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-x86_64.AppImage
+      APPIMAGETOOL_SHA256: ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0
+      APPIMAGE_RUNTIME_URL: https://github.com/AppImage/type2-runtime/releases/download/20251108/runtime-x86_64
+      APPIMAGE_RUNTIME_SHA256: 2fca8b443c92510f1483a883f60061ad09b46b978b2631c807cd873a47ec260d
+    steps:
+      # Before checkout, so that checkout uses git.
+      - name: Install build tools
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates curl git build-essential pkg-config clang libclang-dev file desktop-file-utils xz-utils jq
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-linux
+      - name: Install FFmpeg
+        run: |
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/ffmpeg.tar.xz" "https://github.com/BtbN/FFmpeg-Builds/releases/download/$LINUX_FFMPEG_TAG/$LINUX_FFMPEG_NAME.tar.xz"
+          echo "$LINUX_FFMPEG_SHA256  $RUNNER_TEMP/ffmpeg.tar.xz" | sha256sum -c -
+          tar -xJf "$RUNNER_TEMP/ffmpeg.tar.xz" -C "$RUNNER_TEMP"
+          echo "FFMPEG_DIR=$RUNNER_TEMP/$LINUX_FFMPEG_NAME" >> "$GITHUB_ENV"
+      - name: Install AppImage tools
+        run: |
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/appimagetool-x86_64.AppImage" "$APPIMAGETOOL_URL"
+          echo "$APPIMAGETOOL_SHA256  $RUNNER_TEMP/appimagetool-x86_64.AppImage" | sha256sum -c -
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/runtime-x86_64" "$APPIMAGE_RUNTIME_URL"
+          echo "$APPIMAGE_RUNTIME_SHA256  $RUNNER_TEMP/runtime-x86_64" | sha256sum -c -
+          chmod +x "$RUNNER_TEMP/appimagetool-x86_64.AppImage"
+      - name: Version
+        id: ver
+        run: |
+          APPVER=$(cargo metadata --no-deps --format-version 1 --locked | jq -r '.packages[] | select(.name=="transom") | .version')
+          [ -n "$APPVER" ] || { echo "::error::could not read transom crate version"; exit 1; }
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            VER="$GITHUB_REF_NAME"
+            DEBVER="$APPVER"
+            if [ "${GITHUB_REF_NAME#v}" != "$APPVER" ]; then
+              echo "::error::Tag $GITHUB_REF_NAME does not match crate version $APPVER"
+              exit 1
+            fi
+          else
+            VER="dev-${GITHUB_SHA::7}"
+            DEBVER="${APPVER}~dev+g${GITHUB_SHA::7}"
+          fi
+          {
+            echo "VER=$VER"
+            echo "DEBVER=$DEBVER"
+            echo "APPVER=$APPVER"
+          } >> "$GITHUB_ENV"
+          echo "appver=$APPVER" >> "$GITHUB_OUTPUT"
+      # DT_RPATH (not RUNPATH) so the rpath also covers the dependencies of the FFmpeg libraries.
+      - name: Build
+        env:
+          RUSTFLAGS: -C link-arg=-Wl,--disable-new-dtags,-rpath,$ORIGIN/../lib/transom
+        run: cargo build --locked --release -p transom --bins
+      - name: Stage
+        run: bash packaging/linux/stage-usr.sh target/release "$FFMPEG_DIR" "$LINUX_FFMPEG_NAME" "$LINUX_FFMPEG_TAG" "$RUNNER_TEMP/stage/usr"
+      - name: AppImage
+        run: bash packaging/linux/make-appimage.sh "$RUNNER_TEMP/stage/usr" "$RUNNER_TEMP/appimagetool-x86_64.AppImage" "$RUNNER_TEMP/runtime-x86_64" "dist/transom-$VER-linux-x86_64.AppImage"
+      - name: Deb
+        run: bash packaging/linux/make-deb.sh "$RUNNER_TEMP/stage/usr" "$DEBVER" "dist/transom-$VER-linux-amd64.deb"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: transom-linux-x86_64-appimage
+          path: dist/*.AppImage
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: transom-linux-amd64-deb
+          path: dist/*.deb
+          if-no-files-found: error
+
+  linux-smoke:
+    needs: linux-build
+    runs-on: ubuntu-24.04
+    container: ${{ matrix.image }}
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      fail-fast: false
+      matrix:
+        image:
+          - ubuntu:22.04
+          - ubuntu:24.04
+          - debian:12
+    steps:
+      # No git in these clean images, so checkout falls back to the REST API download.
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: transom-linux-*
+          merge-multiple: true
+          path: dist
+      - name: Smoke test
+        env:
+          APPVER: ${{ needs.linux-build.outputs.version }}
+        run: bash packaging/linux/smoke-test.sh dist "$APPVER"
+
+  publish:
+    needs: [windows, linux-build, linux-smoke]
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Check artifacts
+        run: |
+          ls -l dist
+          count() { find dist -maxdepth 1 -type f -name "$1" | wc -l; }
+          if [ "$(find dist -type f | wc -l)" -ne 3 ] || [ "$(count '*-windows-x64.zip')" -ne 1 ] || [ "$(count '*-linux-x86_64.AppImage')" -ne 1 ] || [ "$(count '*-linux-amd64.deb')" -ne 1 ]; then
+            echo "::error::Expected exactly one Windows zip, one AppImage and one .deb in dist"
+            exit 1
+          fi
       - name: Publish release
-        if: github.ref_type == 'tag'
-        shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create $env:GITHUB_REF_NAME $env:ZIP --title "Transom $env:GITHUB_REF_NAME" --generate-notes
+        run: gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --title "Transom $GITHUB_REF_NAME" --generate-notes
