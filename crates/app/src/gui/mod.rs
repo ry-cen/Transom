@@ -26,9 +26,29 @@ pub struct GuiArgs {
     pub link: Option<String>,
 }
 
-/// Runs the app until its window closes; returns the process exit code. WP-C.
+/// Runs the app until its window closes; returns the process exit code.
 pub fn run(args: GuiArgs) -> anyhow::Result<i32> {
-    let _ = args;
-    eprintln!("transom: the graphical app is not built yet");
-    Ok(1)
+    use anyhow::anyhow;
+    use model::{IdentityInfo, Prefs};
+    use transom_net::store::Store;
+    use transom_proto::identity::b64url_encode;
+
+    let store = Store::open(args.config_dir).map_err(|e| anyhow!("{e}"))?;
+    let prefs = Prefs::load(&store);
+    let identity = store.identity().map_err(|e| anyhow!("{e}"))?;
+    crate::logging::init(args.verbose, &prefs, store.dir());
+    let info = IdentityInfo {
+        fingerprint_b64: b64url_encode(&identity.fingerprint),
+        fingerprint_hex: identity
+            .fingerprint
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect(),
+        config_dir: store.dir().display().to_string(),
+    };
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()?;
+    shell::run(&rt, store, identity, prefs, info)
 }

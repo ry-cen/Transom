@@ -50,6 +50,21 @@ fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
 }
 "#;
 
+/// Something drawn over the video in the same render pass (the GUI's egui output).
+pub trait Overlay {
+    /// Before the pass: upload buffers. The returned buffers are submitted before the frame's
+    /// encoder.
+    fn prepare(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        surface_px: (u32, u32),
+    ) -> Vec<wgpu::CommandBuffer>;
+    /// Inside the pass, after the video.
+    fn paint(&self, pass: &mut wgpu::RenderPass<'static>);
+}
+
 /// The window's GPU surface and the video pipeline. Main thread only.
 pub struct Renderer {
     surface: wgpu::Surface<'static>,
@@ -348,9 +363,31 @@ impl Renderer {
         self.video = None;
     }
 
+    /// The GPU device (for an overlay's own resources).
+    pub fn device(&self) -> &wgpu::Device {
+        &self.device
+    }
+
+    /// The GPU queue.
+    pub fn queue(&self) -> &wgpu::Queue {
+        &self.queue
+    }
+
+    /// The surface's texture format.
+    pub fn format(&self) -> wgpu::TextureFormat {
+        self.config.format
+    }
+
     /// Clears to black and draws the last uploaded frame letterboxed. Returns false when the frame
     /// was skipped (surface busy or reconfigured): call again on the next redraw.
     pub fn render(&mut self) -> bool {
+        self.render_with(None)
+    }
+
+    /// Like `render`, then draws `overlay` over the video in the same pass. The overlay's
+    /// `prepare` is not called when the frame is skipped. Texture uploads and frees are the
+    /// caller's job, outside this call.
+    pub fn render_with(&mut self, mut overlay: Option<&mut dyn Overlay>) -> bool {
         let frame = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(f)
             | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
@@ -368,6 +405,15 @@ impl Renderer {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("video"),
             });
+        let extra = match overlay.as_deref_mut() {
+            Some(o) => o.prepare(
+                &self.device,
+                &self.queue,
+                &mut encoder,
+                (self.config.width, self.config.height),
+            ),
+            None => Vec::new(),
+        };
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("video"),
@@ -402,8 +448,14 @@ impl Renderer {
                     pass.draw(0..6, 0..1);
                 }
             }
+            // egui sets its own viewport and scissor, so the video's needs no reset.
+            if let Some(o) = overlay {
+                let mut pass = pass.forget_lifetime();
+                o.paint(&mut pass);
+            }
         }
-        self.queue.submit([encoder.finish()]);
+        self.queue
+            .submit(extra.into_iter().chain(std::iter::once(encoder.finish())));
         self.queue.present(frame);
         true
     }

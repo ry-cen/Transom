@@ -6,6 +6,8 @@ use crate::NetError;
 use mdns_sd::{ScopedIp, ServiceDaemon, ServiceEvent};
 use std::collections::HashMap;
 use std::net::{SocketAddr, SocketAddrV6};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use transom_proto::pairing::{home_door, tag_matches, HomeDoor};
 
@@ -137,18 +139,57 @@ pub enum BrowseEvent {
 pub struct Watch {
     daemon: Option<ServiceDaemon>,
     thread: Option<std::thread::JoinHandle<()>>,
+    stop: Arc<AtomicBool>,
 }
 
 /// Browses `_sill._tcp` until stopped. Every resolution is sent as `Found` and every removal as
 /// `Removed`, each followed by `wake()`.
-///
-/// Not built yet (WP-B1): returns an error and starts nothing.
 pub fn watch(
     out: crossbeam_channel::Sender<BrowseEvent>,
-    wake: std::sync::Arc<dyn Fn() + Send + Sync>,
+    wake: Arc<dyn Fn() + Send + Sync>,
 ) -> Result<Watch, NetError> {
-    let _ = (out, wake);
-    Err(NetError::Connect("discovery watch is not built yet".into()))
+    let daemon = ServiceDaemon::new().map_err(|e| NetError::Connect(format!("mDNS: {e}")))?;
+    let rx = match daemon.browse(SERVICE) {
+        Ok(rx) => rx,
+        Err(e) => {
+            let _ = daemon.shutdown();
+            return Err(NetError::Connect(format!("mDNS: {e}")));
+        }
+    };
+    let stop = Arc::new(AtomicBool::new(false));
+    let flag = stop.clone();
+    let thread = std::thread::Builder::new()
+        .name("transom-watch".into())
+        .spawn(move || loop {
+            if flag.load(Ordering::Relaxed) {
+                break;
+            }
+            let event = match rx.recv_timeout(Duration::from_millis(250)) {
+                Ok(ServiceEvent::ServiceResolved(info)) => BrowseEvent::Found(to_found(&info)),
+                Ok(ServiceEvent::ServiceRemoved(_ty, fullname)) => {
+                    BrowseEvent::Removed { fullname }
+                }
+                Ok(_) => continue,
+                Err(mdns_sd::RecvTimeoutError::Timeout) => continue,
+                Err(_) => break,
+            };
+            if out.send(event).is_err() {
+                break;
+            }
+            wake();
+        });
+    let thread = match thread {
+        Ok(t) => t,
+        Err(e) => {
+            let _ = daemon.shutdown();
+            return Err(NetError::Connect(format!("mDNS: {e}")));
+        }
+    };
+    Ok(Watch {
+        daemon: Some(daemon),
+        thread: Some(thread),
+        stop,
+    })
 }
 
 impl Watch {
@@ -158,6 +199,7 @@ impl Watch {
     }
 
     fn shut_down(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
         if let Some(daemon) = self.daemon.take() {
             let _ = daemon.shutdown();
         }

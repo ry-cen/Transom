@@ -309,6 +309,9 @@ async fn reader_task<R: AsyncRead + Unpin>(
             }
             kind::WINDOW_LIST
             | kind::APP_LIST
+            | kind::THUMBNAIL
+            | kind::APP_ICON
+            | kind::HOST_SETTINGS
             | kind::PONG
             | kind::CURSOR_SHAPE
             | kind::MAC_INFO
@@ -519,6 +522,31 @@ pub async fn run_session(
                                 out.emit(SessionEvent::AppList(apps));
                             }
                         }
+                        kind::THUMBNAIL => {
+                            if let Some((id, jpeg)) = transom_proto::blobs::decode_thumbnail(&payload) {
+                                out.emit(SessionEvent::Thumbnail { id, jpeg: jpeg.to_vec() });
+                            } else {
+                                log::debug!("bad thumbnail");
+                            }
+                        }
+                        kind::APP_ICON => {
+                            if let Some((bundle_id, png)) = transom_proto::blobs::decode_icon(&payload) {
+                                if transom_proto::safetext::label(&bundle_id, 255) == bundle_id {
+                                    out.emit(SessionEvent::AppIcon { bundle_id, png: png.to_vec() });
+                                } else {
+                                    log::debug!("app icon with an unsafe bundle id skipped");
+                                }
+                            } else {
+                                log::debug!("bad app icon");
+                            }
+                        }
+                        kind::HOST_SETTINGS => {
+                            if let Some(state) = from_json::<HostSettingsState>(&payload) {
+                                out.emit(SessionEvent::HostSettings(state));
+                            } else {
+                                log::debug!("bad host settings");
+                            }
+                        }
                         kind::PONG => {
                             if let Some(bytes) = payload.get(..8) {
                                 let mut b = [0u8; 8];
@@ -596,8 +624,8 @@ pub async fn run_session(
                         );
                     }
                     SessionCommand::WindowCommand(c) => send(kind::WINDOW_COMMAND, &to_json(&c)),
-                    // WP-B1 sends kind 17 here.
-                    SessionCommand::ChangeSettings(_) => {}
+                    SessionCommand::ChangeSettings(c) => send(kind::CHANGE_SETTINGS, &to_json(&c)),
+                    // Only meaningful while idle (supervisor).
                     SessionCommand::RetryNow => {}
                     SessionCommand::Close => {
                         drain_writer(&mut writer, &wtx).await;

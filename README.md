@@ -41,6 +41,13 @@ cargo build --release
 
 The program is `target/release/transom` (`transom.exe` on Windows).
 
+## The app
+
+- `transom-gui`, or `transom` with no arguments, opens the window. Pair a Mac from the list when it appears, or use **Add a Mac** with its address and the pairing code.
+- While streaming, hold Ctrl+Alt+Shift (Control+Option+Shift on macOS) and press a key: B shows or hides the bar, D selects the desktop, W the next window, S opens the Mac's settings, F toggles full screen and Q disconnects.
+- Preferences are saved as `prefs.json` in the config folder (see `transom identity` for its path).
+- On Windows, `transom-gui.exe` opens no console window.
+
 ## Use
 
 ### Pair

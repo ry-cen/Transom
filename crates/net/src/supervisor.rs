@@ -191,40 +191,57 @@ pub async fn open(
     }
 }
 
-/// Applies a command that arrives while no session runs. Returns true for Close.
-fn apply_idle(options: &mut SessionOptions, cmd: Option<SessionCommand>) -> bool {
+/// What an idle-time command asks of the supervisor.
+enum Idle {
+    Continue,
+    Stop,
+    Wake,
+}
+
+/// Why `while_idle` returned.
+enum IdleEnd<T> {
+    Done(T),
+    Stop,
+    Woken,
+}
+
+/// Applies a command that arrives while no session runs.
+fn apply_idle(options: &mut SessionOptions, cmd: Option<SessionCommand>) -> Idle {
     match cmd {
-        None | Some(SessionCommand::Close) => true,
+        None | Some(SessionCommand::Close) => Idle::Stop,
+        Some(SessionCommand::RetryNow) => Idle::Wake,
         Some(SessionCommand::Select(s)) => {
             match s {
                 StreamSource::Desktop {} => options.source = SourceChoice::Desktop,
                 StreamSource::Window { id } => options.source = SourceChoice::Window(id),
                 StreamSource::None {} => {}
             }
-            false
+            Idle::Continue
         }
         Some(SessionCommand::Viewport(v)) => {
             options.viewport = Some(v);
-            false
+            Idle::Continue
         }
-        Some(_) => false,
+        Some(_) => Idle::Continue,
     }
 }
 
-/// Runs `fut` while draining commands. None means the supervisor must stop.
+/// Runs `fut` while draining commands. RetryNow ends a backoff wait now (`wakeable`); ignored at
+/// any other time (spec 8.5).
 async fn while_idle<F: std::future::Future>(
     fut: F,
     cmds: &mut mpsc::UnboundedReceiver<SessionCommand>,
     options: &mut SessionOptions,
-) -> Option<F::Output> {
+    wakeable: bool,
+) -> IdleEnd<F::Output> {
     tokio::pin!(fut);
     loop {
         tokio::select! {
-            r = &mut fut => return Some(r),
-            c = cmds.recv() => {
-                if apply_idle(options, c) {
-                    return None;
-                }
+            r = &mut fut => return IdleEnd::Done(r),
+            c = cmds.recv() => match apply_idle(options, c) {
+                Idle::Stop => return IdleEnd::Stop,
+                Idle::Wake if wakeable => return IdleEnd::Woken,
+                Idle::Wake | Idle::Continue => {}
             }
         }
     }
@@ -299,14 +316,16 @@ async fn supervise(
         out.emit(SessionEvent::Status(format!(
             "Connecting to {label}\u{2026}"
         )));
-        let Some(opened) = while_idle(
+        let opened = match while_idle(
             open(&route, &identity, SESSION_ALPN),
             &mut cmds,
             &mut options,
+            false,
         )
         .await
-        else {
-            return;
+        {
+            IdleEnd::Done(r) => r,
+            IdleEnd::Stop | IdleEnd::Woken => return,
         };
         let (backoff_text, backoff_kind): (String, EndKind) = match opened {
             Err(e) => match terminal_text(&e, &label) {
@@ -367,9 +386,8 @@ async fn supervise(
             retry_in: Some(delay),
             kind: backoff_kind,
         });
-        if while_idle(tokio::time::sleep(delay), &mut cmds, &mut options)
-            .await
-            .is_none()
+        if let IdleEnd::Stop =
+            while_idle(tokio::time::sleep(delay), &mut cmds, &mut options, true).await
         {
             return;
         }
