@@ -158,6 +158,38 @@ impl SessionState {
                         None => log::info!("link keeping up"),
                     }
                 }
+                let old = self.host_settings.as_ref();
+                if old.map(|h| (&h.stream, h.software_encoder))
+                    != Some((&s.stream, s.software_encoder))
+                {
+                    match &s.stream {
+                        Some(r) => log::info!(
+                            "Mac stream: {}x{} at up to {} fps, {} Mbps{}{}",
+                            r.width,
+                            r.height,
+                            r.fps,
+                            r.mbps,
+                            if r.on_virtual_display {
+                                ", virtual display"
+                            } else {
+                                ""
+                            },
+                            if s.software_encoder {
+                                ", software encoder"
+                            } else {
+                                ""
+                            }
+                        ),
+                        None => log::info!(
+                            "Mac stream: none{}",
+                            if s.software_encoder {
+                                ", software encoder"
+                            } else {
+                                ""
+                            }
+                        ),
+                    }
+                }
                 self.host_settings = Some(s);
             }
             SessionEvent::CursorShape(_) => {}

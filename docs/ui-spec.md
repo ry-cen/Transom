@@ -609,6 +609,10 @@ had no id.
 | SET30 | — | Text Size | Phase 2 |
 | SET31 | — | Off | Text Size choice |
 | SET32 | — | Keymap | Panel row label |
+| SET34 | — | Stream | Mac settings panel heading for what the Mac runs |
+| SET35 | — | The Mac has not reported a running stream yet. | No `stream` in the host settings |
+| SET36 | — | The Mac encodes ‹w›×‹h› at up to ‹fps› fps, ‹n› Mbps[, on the virtual display]. | The host settings' `stream`; also logged at info on every change |
+| SET37 | — | Software encoder: the Mac's hardware encoder did not answer, so streams run at up to 60 fps at Standard until it recovers (the Mac checks every 30 s). | `softwareEncoder` true, in the error colour |
 | PREF1 | — | Name on your Macs | General |
 | PREF2 | G1 | Macs you already paired keep showing the old name. | Under PREF1 |
 | PREF3 | — | This computer's key | General |

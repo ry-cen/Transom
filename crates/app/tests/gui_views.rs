@@ -563,6 +563,33 @@ fn escape_closes_dialog() {
     assert_eq!(closes, 1, "{:?}", h.state().out);
 }
 
+/// The Mac settings panel shows what the Mac runs, and the software encoder in the error colour.
+#[test]
+fn mac_settings_shows_the_running_stream() {
+    let now = Instant::now();
+    let mut m = stream_model(now, false);
+    let hs = serde_json::from_str(
+        r#"{"settings": {"maxFPS": 120, "bitrate": 15000000, "captureScale": 2,
+            "prioritizeSpeed": false, "virtualDisplay": false},
+          "persistent": true, "virtualDisplayAvailable": false, "softwareEncoder": true,
+          "stream": {"width": 5120, "height": 2880, "fps": 120, "mbps": 30,
+            "onVirtualDisplay": false}}"#,
+    )
+    .unwrap();
+    let s = m.stream_mut().unwrap();
+    s.session.apply(SessionEvent::HostSettings(hs), now);
+    s.panel = Some(StreamPanel::MacSettings);
+    let h = start(m, now);
+    h.get_by_label("The Mac encodes 5120×2880 at up to 120 fps, 30 Mbps.");
+    h.get_by_label(texts::SOFTWARE_ENCODER);
+
+    let mut m = stream_model(now, false);
+    m.stream_mut().unwrap().panel = Some(StreamPanel::MacSettings);
+    let h = start(m, now);
+    h.get_by_label(texts::STREAM_NONE);
+    assert!(h.query_by_label(texts::SOFTWARE_ENCODER).is_none());
+}
+
 /// The bar shows Sill's link report while the Mac says the link is behind, and nothing else.
 #[test]
 fn bar_shows_the_link_report_while_behind() {

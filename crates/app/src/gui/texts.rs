@@ -8,7 +8,7 @@
 use crate::gui::model::{PairFailure, RouteDesc, RowWord};
 use transom_net::session::EndKind;
 use transom_proto::address::AddressError;
-use transom_proto::host_settings::LinkReport;
+use transom_proto::host_settings::{LinkReport, RunningStream};
 use transom_proto::messages::goodbye_reason as gr;
 use transom_proto::safetext::{label, LABEL_LIMIT};
 use transom_proto::version::SillVersion;
@@ -481,6 +481,27 @@ pub fn link_tooltip(link: &LinkReport) -> String {
     t
 }
 
+/// SET34: the Mac settings panel's stream heading.
+pub const STREAM_HEADING: &str = "Stream";
+/// SET35: no stream is running on the Mac yet.
+pub const STREAM_NONE: &str = "The Mac has not reported a running stream yet.";
+/// SET37: the Mac fell back to its software encoder (`HostSettingsState.softwareEncoder`).
+pub const SOFTWARE_ENCODER: &str = "Software encoder: the Mac's hardware encoder did not answer, \
+     so streams run at up to 60 fps at Standard until it recovers (the Mac checks every 30 s).";
+
+/// SET36: what the Mac is encoding (`HostSettingsState.stream`).
+pub fn running_stream(r: &RunningStream) -> String {
+    let display = if r.on_virtual_display {
+        ", on the virtual display"
+    } else {
+        ""
+    };
+    format!(
+        "The Mac encodes {}×{} at up to {} fps, {} Mbps{display}.",
+        r.width, r.height, r.fps, r.mbps
+    )
+}
+
 /// BAR6: the gear's accessible label.
 pub const MAC_SETTINGS: &str = "Mac settings";
 /// BAR7: button and accessible label.
@@ -922,6 +943,23 @@ pub fn end_text(kind: &EndKind, mac: &str, supervisor_text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn running_stream_reads_the_report() {
+        let mut r = RunningStream {
+            width: 5120,
+            height: 2880,
+            fps: 120,
+            mbps: 30,
+            on_virtual_display: false,
+        };
+        assert_eq!(
+            running_stream(&r),
+            "The Mac encodes 5120×2880 at up to 120 fps, 30 Mbps."
+        );
+        r.on_virtual_display = true;
+        assert!(running_stream(&r).ends_with(", on the virtual display."));
+    }
 
     #[test]
     fn link_tooltip_reads_the_report() {
