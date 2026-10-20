@@ -241,6 +241,12 @@ impl App {
             let resets = matches!(e, Effect::StartStream { .. } | Effect::StopStream);
             let starts = matches!(e, Effect::StartStream { .. });
             let prefs = self.model.prefs.clone();
+            if resets {
+                // The Mac's cursor must not outlive the stream: put the arrow back first.
+                if let (Some(core), Some(w)) = (self.effects.stream_mut(), self.window.as_ref()) {
+                    core.apply_cursor(w, false);
+                }
+            }
             match &self.window {
                 Some(w) => {
                     let mut p = WinPlatform {
@@ -396,12 +402,18 @@ impl App {
         let raw = g.state.take_egui_input(&window);
         self.ctx.set_zoom_factor(self.model.prefs.ui_zoom);
         let mut out: Vec<Msg> = Vec::new();
+        let mut scratch: Vec<Msg> = Vec::new();
         let mut full = {
             let (model, drafts, images) = (&self.model, &mut self.drafts, &self.images);
             self.ctx.run_ui(raw, |ui| {
-                // egui may run the pass twice; only the last pass's messages count.
-                out.clear();
-                view::draw(ui, model, drafts, images, now, &mut out);
+                // egui may run the pass twice and gives the input events to pass 0 only, so
+                // pass 0's messages are the ones that count; later passes draw into a scratch.
+                if ui.ctx().current_pass_index() == 0 {
+                    view::draw(ui, model, drafts, images, now, &mut out);
+                } else {
+                    scratch.clear();
+                    view::draw(ui, model, drafts, images, now, &mut scratch);
+                }
             })
         };
         // 6.
@@ -585,15 +597,34 @@ impl ApplicationHandler<UserEvent> for App {
                             self.chord(c);
                             return;
                         }
-                        KeyOutcome::Swallowed => return,
+                        KeyOutcome::Swallowed => {
+                            // Egui never saw the press; a stray release is harmless.
+                            if ke.state == ElementState::Released {
+                                self.feed_egui(&event);
+                            }
+                            return;
+                        }
                         _ => {}
                     }
                 }
-                if self.mode == KeyboardMode::Transom || self.effects.stream().is_none() {
+                // A release always reaches egui: a key pressed in Transom mode and released in
+                // Mac mode would otherwise stay down in egui's keys_down.
+                if self.mode == KeyboardMode::Transom
+                    || self.effects.stream().is_none()
+                    || ke.state == ElementState::Released
+                {
                     self.feed_egui(&event);
                 }
             }
-            WindowEvent::KeyboardInput { .. } | WindowEvent::Ime(_) => {
+            WindowEvent::KeyboardInput { event: ke, .. } => {
+                if self.mode == KeyboardMode::Transom
+                    || self.effects.stream().is_none()
+                    || ke.state == ElementState::Released
+                {
+                    self.feed_egui(&event);
+                }
+            }
+            WindowEvent::Ime(_) => {
                 if self.mode == KeyboardMode::Transom || self.effects.stream().is_none() {
                     self.feed_egui(&event);
                 }

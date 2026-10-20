@@ -493,6 +493,8 @@ impl StreamCore {
             self.send_all(pointer);
         }
         self.router.swallowed.clear();
+        // Focus loss and mode changes also drop the left-Ctrl memory (its release may be missed).
+        self.router.left_ctrl_down = false;
     }
 
     pub fn send(&self, cmd: SessionCommand) {

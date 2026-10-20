@@ -50,5 +50,8 @@ pub fn run(args: GuiArgs) -> anyhow::Result<i32> {
         .worker_threads(2)
         .enable_all()
         .build()?;
-    shell::run(&rt, store, identity, prefs, info)
+    let result = shell::run(&rt, store, identity, prefs, info);
+    // Do not hang on a blocked task at exit.
+    rt.shutdown_timeout(std::time::Duration::from_millis(500));
+    result
 }

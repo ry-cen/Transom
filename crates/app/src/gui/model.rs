@@ -565,7 +565,17 @@ impl StreamView {
 }
 
 impl Model {
-    pub fn new(identity: IdentityInfo, prefs: Prefs, saved: Vec<SavedMac>, now: Instant) -> Model {
+    pub fn new(
+        identity: IdentityInfo,
+        mut prefs: Prefs,
+        saved: Vec<SavedMac>,
+        now: Instant,
+    ) -> Model {
+        prefs.ui_zoom = if prefs.ui_zoom.is_finite() {
+            prefs.ui_zoom.clamp(ZOOM_MIN, ZOOM_MAX)
+        } else {
+            1.0
+        };
         let mut m = Model {
             screen: Screen::Macs { card: None },
             saved,
@@ -662,6 +672,16 @@ impl Model {
                 Vec::new()
             }
             Msg::Session(ev) => self.on_session(ev, now),
+            // Nothing may replace a card whose pairing is in flight, or its late success
+            // would be dropped without saving the Mac.
+            Msg::ClickRow { .. } | Msg::RowMenu { .. } | Msg::OpenAdd
+                if self.pairing_in_flight() =>
+            {
+                Vec::new()
+            }
+            Msg::BannerAction(a) if a != BannerAction::GetSill && self.pairing_in_flight() => {
+                Vec::new()
+            }
             Msg::ClickRow { key } => self.click_row(&key, now),
             Msg::RowMenu { key, item } => self.row_menu(&key, item, now),
             Msg::PairOpenDoor => {
@@ -681,6 +701,11 @@ impl Model {
             Msg::CancelCard => {
                 let mut out = Vec::new();
                 if let Screen::Macs { card } = &mut self.screen {
+                    // Pairing in flight cannot be cancelled: a late success must still save
+                    // the Mac (the Pair and the Add card alike).
+                    if card_is_working(card.as_ref()) {
+                        return out;
+                    }
                     if let Some(Card::Pair(p)) = card {
                         if let (PairState::Code { .. }, true, Some(pin)) =
                             (&p.state, p.shown, p.pin)
@@ -1014,6 +1039,11 @@ impl Model {
         vec![Effect::Ask { gen, addrs }]
     }
 
+    /// Whether the Macs screen shows a Pair or Add card waiting for the Mac's answer.
+    fn pairing_in_flight(&self) -> bool {
+        matches!(&self.screen, Screen::Macs { card } if card_is_working(card.as_ref()))
+    }
+
     fn open_add(&mut self) {
         let gen = self.take_gen();
         self.set_card(Some(Card::Add(AddCard {
@@ -1280,6 +1310,19 @@ impl Model {
                 actions: vec![BannerAction::ForgetAndPair],
                 mac_id,
             });
+            // The Paired card would retry on every tick.
+            let paired = match &self.screen {
+                Screen::Macs {
+                    card: Some(Card::Pair(p)),
+                } => matches!(p.state, PairState::Paired { .. }),
+                Screen::Macs {
+                    card: Some(Card::Add(a)),
+                } => matches!(a.state, PairState::Paired { .. }),
+                _ => false,
+            };
+            if paired {
+                self.set_card(None);
+            }
             return Vec::new();
         };
         self.banner = None;
@@ -1524,6 +1567,15 @@ impl Model {
             }
         }
         best
+    }
+}
+
+/// A Pair or Add card whose pairing is in flight.
+fn card_is_working(card: Option<&Card>) -> bool {
+    match card {
+        Some(Card::Pair(p)) => matches!(p.state, PairState::Working),
+        Some(Card::Add(a)) => matches!(a.state, PairState::Working),
+        _ => false,
     }
 }
 
@@ -1802,10 +1854,104 @@ mod tests {
         let fx = m.update(Msg::PairDone(gen + 1, paired_ok("M")), now);
         assert!(fx.is_empty());
         assert!(matches!(pair_card(&m).state, PairState::Working));
-        // A late answer after Cancel changes nothing.
+        // A late answer after the card was closed changes nothing.
+        m.update(Msg::PairDone(gen, Err(refused("nope", None))), now);
         m.update(Msg::CancelCard, now);
-        assert!(m.update(Msg::PairDone(gen, paired_ok("M")), now).is_empty());
         assert!(!has_card(&m));
+        assert!(m.update(Msg::PairDone(gen, paired_ok("M")), now).is_empty());
+    }
+
+    #[test]
+    fn cancel_is_ignored_while_pairing_is_working() {
+        // The Pair card.
+        let (mut m, now) = code_prompt(true);
+        let gen = pair_card(&m).gen;
+        m.update(Msg::SubmitCode(GOOD_CODE.into()), now);
+        assert!(matches!(pair_card(&m).state, PairState::Working));
+        assert!(m.update(Msg::CancelCard, now).is_empty());
+        assert!(matches!(pair_card(&m).state, PairState::Working));
+        let fx = m.update(Msg::PairDone(gen, paired_ok("M")), now);
+        assert!(matches!(fx.as_slice(), [Effect::SaveMac(s)] if s.mac_id == "M"));
+        // The Add card.
+        let (mut m, now) = model_with(Vec::new());
+        m.update(Msg::OpenAdd, now);
+        let gen = add_card(&m).gen;
+        m.update(
+            Msg::SubmitAddress {
+                address: "127.0.0.1:7455".into(),
+                code: GOOD_CODE.into(),
+            },
+            now,
+        );
+        assert!(matches!(add_card(&m).state, PairState::Working));
+        assert!(m.update(Msg::CancelCard, now).is_empty());
+        assert!(matches!(add_card(&m).state, PairState::Working));
+        let fx = m.update(Msg::PairDone(gen, paired_ok("M")), now);
+        assert!(matches!(fx.first(), Some(Effect::SaveMac(s)) if s.mac_id == "M"));
+    }
+
+    #[test]
+    fn nothing_replaces_a_card_while_pairing_is_working() {
+        let (mut m, now) = model_with(Vec::new());
+        m.update(Msg::OpenAdd, now);
+        let gen = add_card(&m).gen;
+        m.update(
+            Msg::SubmitAddress {
+                address: "127.0.0.1:7455".into(),
+                code: GOOD_CODE.into(),
+            },
+            now,
+        );
+        assert!(matches!(add_card(&m).state, PairState::Working));
+        // Ctrl/Cmd+N opens a fresh Add card when nothing is in flight; here it must not.
+        assert!(m.update(Msg::OpenAdd, now).is_empty());
+        assert_eq!(add_card(&m).gen, gen);
+        assert!(matches!(add_card(&m).state, PairState::Working));
+        let fx = m.update(Msg::PairDone(gen, paired_ok("M")), now);
+        assert!(matches!(fx.first(), Some(Effect::SaveMac(s)) if s.mac_id == "M"));
+    }
+
+    #[test]
+    fn unroutable_paired_mac_clears_the_card_once() {
+        let (mut m, now) = model_with(Vec::new());
+        m.update(Msg::OpenAdd, now);
+        let gen = add_card(&m).gen;
+        m.update(
+            Msg::SubmitAddress {
+                address: "127.0.0.1:7455".into(),
+                code: GOOD_CODE.into(),
+            },
+            now,
+        );
+        m.update(Msg::PairDone(gen, paired_ok("M")), now);
+        // The remote plan cannot be routed when the saved key is unreadable.
+        if let Screen::Macs {
+            card: Some(Card::Add(a)),
+        } = &mut m.screen
+        {
+            if let PairState::Paired { mac, .. } = &mut a.state {
+                mac.fingerprint = "!!".into();
+            }
+        }
+        let fx = m.update(Msg::Tick, now + PAIRED_PAUSE);
+        assert!(fx.is_empty());
+        assert!(!has_card(&m));
+        assert!(m.banner.is_some());
+        assert!(m.update(Msg::Tick, now + PAIRED_PAUSE + ms(500)).is_empty());
+    }
+
+    #[test]
+    fn new_clamps_the_stored_zoom() {
+        let (m, _) = model_with(Vec::new());
+        assert_eq!(m.prefs.ui_zoom, 1.0);
+        for (z, want) in [(9.0, ZOOM_MAX), (0.1, ZOOM_MIN), (f32::NAN, 1.0)] {
+            let p = Prefs {
+                ui_zoom: z,
+                ..Prefs::default()
+            };
+            let m = Model::new(m.identity.clone(), p, Vec::new(), Instant::now());
+            assert_eq!(m.prefs.ui_zoom, want);
+        }
     }
 
     #[test]

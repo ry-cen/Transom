@@ -44,10 +44,12 @@ pub fn draw(ui: &mut Ui, cx: &mut Cx, s: &StreamView) {
                 ui.set_width(380.0);
                 match &s.session.phase {
                     Phase::Connecting => {
-                        let text = if s.session.status.is_empty() {
+                        // The status carries the Mac's own name: never show it unfiltered.
+                        let status = transom_proto::safetext::label(&s.session.status, 300);
+                        let text = if status.is_empty() {
                             texts::connecting_to(mac)
                         } else {
-                            s.session.status.clone()
+                            status
                         };
                         ui.horizontal(|ui| {
                             ui.spinner();

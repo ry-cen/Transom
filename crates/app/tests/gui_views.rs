@@ -388,6 +388,21 @@ fn connecting_card_cancel_disconnects() {
 }
 
 #[test]
+fn connecting_card_filters_the_mac_string() {
+    let now = Instant::now();
+    let mut m = model(now);
+    let mut s = StreamView::new(None, RouteDesc::Home, "Studio");
+    let raw = "Connecting to Evil\u{202E}\u{7}Mac\u{0}\n\u{2026}";
+    s.session.status = raw.into();
+    m.screen = Screen::Stream(s);
+    let expected = transom_proto::safetext::label(raw, 300);
+    assert_ne!(expected, raw);
+    let h = start_spinning(m, now);
+    assert_eq!(h.query_all_by_label(&expected).count(), 1);
+    assert_eq!(h.query_all_by_label(raw).count(), 0);
+}
+
+#[test]
 fn banner_not_paired_has_pair_again() {
     let now = Instant::now();
     let mut m = model(now);
