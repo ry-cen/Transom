@@ -1,20 +1,22 @@
 //! A mock Sill host for trying Transom without a Mac. It listens on 127.0.0.1 unless
 //! `--bonjour` is given.
 //!
-//! Usage: `cargo run -p transom-net --example mockhost --features mock -- [--bonjour] [--name NAME] [--no-pairing] [video.hevc]`
+//! Usage: `cargo run -p transom-net --example mockhost --features mock -- [--bonjour] [--name NAME] [--no-pairing] [--link-behind] [video.hevc]`
 
 use transom_net::discovery;
 use transom_net::mock::{MockConfig, MockEvent, MockHost};
-use transom_proto::host_settings::{HostSettingsState, StreamSettings};
+use transom_proto::host_settings::{HostSettingsState, LinkReport, StreamSettings, LINK_BEHIND};
 use transom_proto::messages::{to_json, AppInfo};
 use transom_proto::pairing::group_code;
 use transom_proto::video::host_packets_from_annexb;
 
-const USAGE: &str = "Usage: mockhost [--bonjour] [--name NAME] [--no-pairing] [video.hevc]
+const USAGE: &str =
+    "Usage: mockhost [--bonjour] [--name NAME] [--no-pairing] [--link-behind] [video.hevc]
 
   --bonjour     listen on all interfaces and advertise as _sill._tcp
   --name NAME   the Mac's name (default \"Mock Mac\")
   --no-pairing  accept any key; with --bonjour, advertise the Open door (p=0)
+  --link-behind start with the link reported behind (for the Lower Quality toast)
   --help        print this help";
 
 fn thumbnail(rgb: [u8; 3]) -> Vec<u8> {
@@ -41,6 +43,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut bonjour = false;
     let mut name = "Mock Mac".to_string();
     let mut pairing = true;
+    let mut link_behind = false;
     let mut path: Option<String> = None;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
@@ -51,6 +54,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             "--bonjour" => bonjour = true,
             "--no-pairing" => pairing = false,
+            "--link-behind" => link_behind = true,
             "--name" => name = args.next().ok_or("--name needs a value")?,
             s if s.starts_with("--") => return Err(format!("unknown option {s}\n{USAGE}").into()),
             _ => path = Some(a),
@@ -85,7 +89,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 capture_scale: 2.0,
                 prioritize_speed: false,
                 virtual_display: false,
-                direct_wireless: None,
+                direct_wireless: Some(false),
             },
             persistent: true,
             virtual_display_available: false,
@@ -94,7 +98,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             stream: None,
             answering: None,
             away: None,
-            link: None,
+            link: link_behind.then(|| LinkReport {
+                state: LINK_BEHIND.into(),
+                withheld_per_second: 12,
+                bitrate: 15_000_000,
+                carried_kbps: Some(9_000),
+                suggested_bitrate: Some(8_000_000),
+                suggested_capture_scale: Some(1.0),
+            }),
         }),
         ..MockConfig::default()
     };

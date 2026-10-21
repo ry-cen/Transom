@@ -224,6 +224,130 @@ async fn change_settings_is_answered_with_token() {
     r.handle.close();
 }
 
+async fn settings_answer(r: &Running, host: &MockHost, c: HostSettingsChange) -> HostSettingsState {
+    connected(r).await;
+    let first = next_matching(&r.events, WAIT, |e| {
+        matches!(e, SessionEvent::HostSettings(_))
+    })
+    .await;
+    assert!(first.is_some(), "no initial HostSettings");
+    r.handle.send(SessionCommand::ChangeSettings(c));
+    let ev = next_matching(host.events(), WAIT, |e| {
+        matches!(e, MockEvent::ChangeSettings(_))
+    })
+    .await;
+    assert!(ev.is_some(), "the mock never saw the change");
+    match next_matching(&r.events, WAIT, |e| {
+        matches!(e, SessionEvent::HostSettings(_))
+    })
+    .await
+    {
+        Some(SessionEvent::HostSettings(s)) => s,
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn out_of_choice_change_is_refused_with_token() {
+    let host = MockHost::start(rich_config()).await.unwrap();
+    let r = start_session(&host, &id(), Trust::AnyKey);
+    let s = settings_answer(
+        &r,
+        &host,
+        HostSettingsChange {
+            token: Some(3),
+            max_fps: Some(90),
+            bitrate: Some(25_000_000),
+            ..Default::default()
+        },
+    )
+    .await;
+    assert_eq!(s.answering, Some(3));
+    assert_eq!(s.settings.max_fps, 60);
+    assert_eq!(s.settings.bitrate, 25_000_000);
+    r.handle.close();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn virtual_display_refused_when_unavailable() {
+    let host = MockHost::start(rich_config()).await.unwrap();
+    let r = start_session(&host, &id(), Trust::AnyKey);
+    let s = settings_answer(
+        &r,
+        &host,
+        HostSettingsChange {
+            token: Some(4),
+            virtual_display: Some(true),
+            ..Default::default()
+        },
+    )
+    .await;
+    assert_eq!(s.answering, Some(4));
+    assert!(!s.settings.virtual_display);
+    r.handle.close();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn silent_mock_records_but_never_answers() {
+    let host = MockHost::start(MockConfig {
+        settings_silent: true,
+        ..rich_config()
+    })
+    .await
+    .unwrap();
+    let r = start_session(&host, &id(), Trust::AnyKey);
+    connected(&r).await;
+    let first = next_matching(&r.events, WAIT, |e| {
+        matches!(e, SessionEvent::HostSettings(_))
+    })
+    .await;
+    assert!(first.is_some(), "no initial HostSettings");
+    r.handle
+        .send(SessionCommand::ChangeSettings(HostSettingsChange {
+            token: Some(5),
+            max_fps: Some(120),
+            ..Default::default()
+        }));
+    let ev = next_matching(host.events(), WAIT, |e| {
+        matches!(e, MockEvent::ChangeSettings(_))
+    })
+    .await;
+    assert!(matches!(ev, Some(MockEvent::ChangeSettings(_))));
+    let answer = next_matching(&r.events, Duration::from_millis(1500), |e| {
+        matches!(e, SessionEvent::HostSettings(_))
+    })
+    .await;
+    assert!(answer.is_none(), "a silent mock answered: {answer:?}");
+    r.handle.close();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stats_carry_the_worst_round_trip() {
+    let host = MockHost::start(rich_config()).await.unwrap();
+    let r = start_session(&host, &id(), Trust::AnyKey);
+    connected(&r).await;
+    let ev = next_matching(&r.events, Duration::from_secs(5), |e| {
+        matches!(
+            e,
+            SessionEvent::Stats {
+                rtt_ms: Some(_),
+                rtt_max_ms: Some(_),
+                ..
+            }
+        )
+    })
+    .await;
+    match ev {
+        Some(SessionEvent::Stats {
+            rtt_ms: Some(m),
+            rtt_max_ms: Some(x),
+            ..
+        }) => assert!(x >= m, "max {x} < median {m}"),
+        other => panic!("no stats with a round trip: {other:?}"),
+    }
+    r.handle.close();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn retry_now_cuts_backoff() {
     let cfg = MockConfig {

@@ -3,12 +3,13 @@
 //! by hand and the views only push `Msg`s.
 #![cfg(feature = "gui")]
 
-use egui_kittest::kittest::{by, Queryable};
+use egui_kittest::kittest::{by, NodeT, Queryable};
 use egui_kittest::Harness;
 use std::time::{Duration, Instant};
 use transom_app::gui::model::{
     AddCard, Banner, BannerAction, Card, Dialog, IdentityInfo, MacRow, Model, Msg, PairCard,
-    PairState, Prefs, PrefsTab, RouteDesc, RowKey, RowWord, Screen, StreamPanel, StreamView,
+    PairState, Prefs, PrefsTab, RouteDesc, RowKey, RowWord, Screen, StreamPanel, StreamView, Toast,
+    ToastAction, SETTINGS_WAIT,
 };
 use transom_app::gui::texts;
 use transom_app::gui::view::{draw, Drafts, Image, ImageLookup};
@@ -16,6 +17,7 @@ use transom_app::session_state::Phase;
 use transom_net::discovery::FoundMac;
 use transom_net::session::{EndKind, SessionEvent};
 use transom_net::store::SavedMac;
+use transom_proto::host_settings::{HostSettingsChange, HostSettingsState};
 use transom_proto::messages::{StreamSource, WindowInfo, WindowList};
 use transom_proto::pairing::HomeDoor;
 
@@ -464,11 +466,11 @@ fn view_only_chip_when_local_peer() {
 }
 
 #[test]
-fn gear_panel_is_phase1() {
+fn gear_panel_loads_then_says_update_sill() {
     let now = Instant::now();
     let mut m = stream_model(now, true);
     m.stream_mut().unwrap().panel = Some(StreamPanel::MacSettings);
-    let h = start(m, now);
+    let h = start_spinning(m.clone(), now);
     h.get_by_label(texts::THIS_COMPUTER);
     h.get_by_label(texts::KEYMAP_PC);
     h.get_by_label(texts::SEND_KEYBOARD);
@@ -477,7 +479,14 @@ fn gear_panel_is_phase1() {
             .count(),
         2
     );
-    assert!(h.query_by_label(texts::QUALITY).is_none());
+    h.get_by_label(texts::LOADING_SETTINGS);
+    assert!(h
+        .query_by_role_and_label(egui::accesskit::Role::ComboBox, texts::QUALITY)
+        .is_none());
+
+    let h = start_spinning(m, now + SETTINGS_WAIT);
+    h.get_by_label(&texts::update_sill_for_settings("Studio"));
+    assert!(h.query_by_label(texts::LOADING_SETTINGS).is_none());
 }
 
 #[test]
@@ -632,14 +641,27 @@ fn mac_settings_shows_the_running_stream() {
     s.session.apply(SessionEvent::HostSettings(hs), now);
     s.panel = Some(StreamPanel::MacSettings);
     let h = start(m, now);
-    h.get_by_label("The Mac encodes 5120×2880 at up to 120 fps, 30 Mbps.");
-    h.get_by_label(texts::SOFTWARE_ENCODER);
+    h.get_by_label(&texts::now_streaming(5120, 2880, 120, 30));
+    h.get_by_label(&texts::software_encoder("Studio"));
+    assert!(h.query_by_label(texts::SOFTWARE_ENCODER).is_none());
 
     let mut m = stream_model(now, false);
     m.stream_mut().unwrap().panel = Some(StreamPanel::MacSettings);
+    let h = start_spinning(m, now);
+    assert!(h.query_by_label(texts::STREAM_NONE).is_none());
+    assert!(h.query_by_label(texts::NOT_STREAMING).is_none());
+
+    let mut m = stream_model(now, false);
+    with_settings(
+        &mut m,
+        r#"{"settings": {"maxFPS": 120, "bitrate": 15000000, "captureScale": 2,
+            "prioritizeSpeed": false, "virtualDisplay": false},
+          "persistent": true, "virtualDisplayAvailable": false, "softwareEncoder": false}"#,
+        now,
+    );
+    m.stream_mut().unwrap().panel = Some(StreamPanel::MacSettings);
     let h = start(m, now);
-    h.get_by_label(texts::STREAM_NONE);
-    assert!(h.query_by_label(texts::SOFTWARE_ENCODER).is_none());
+    h.get_by_label(texts::NOT_STREAMING);
 }
 
 /// The bar shows Sill's link report while the Mac says the link is behind, and nothing else.
@@ -738,10 +760,19 @@ fn every_dialog_and_card_renders_with_default_fonts() {
     models.push(m);
     let mut m = stream_model(now, true);
     m.stream_mut().unwrap().panel = Some(StreamPanel::MacSettings);
-    m.toasts = vec![transom_app::gui::model::Toast {
+    m.toasts = vec![Toast {
         text: texts::everyone_sees("Studio"),
         until: now + Duration::from_secs(3),
         action: None,
+    }];
+    models.push(m);
+    let mut m = stream_model(now, false);
+    with_settings(&mut m, FULL, now);
+    m.stream_mut().unwrap().panel = Some(StreamPanel::MacSettings);
+    m.toasts = vec![Toast {
+        text: texts::link_behind("Studio"),
+        until: now + Duration::from_secs(3),
+        action: Some(ToastAction::LowerQuality),
     }];
     models.push(m);
     for m in models {
@@ -816,4 +847,299 @@ fn arrow_down_moves_focus_between_rows() {
         h.get_by_label("Laptop, Remote").is_focused(),
         "focus did not move to the second row"
     );
+}
+
+const FULL: &str = r#"{
+  "settings": {"maxFPS": 120, "bitrate": 15000000, "captureScale": 2,
+               "prioritizeSpeed": false, "virtualDisplay": false, "directWireless": false},
+  "persistent": false,
+  "virtualDisplayAvailable": true,
+  "softwareEncoder": true,
+  "stream": {"width": 2880, "height": 1800, "fps": 60, "mbps": 15, "onVirtualDisplay": false},
+  "away": {"homeBitrate": 40000000, "homeCaptureScale": 2, "awayBitrate": 8000000,
+           "awayCaptureScale": 1, "thisConnectionAway": true, "awayRunning": true}
+}"#;
+
+fn with_settings(m: &mut Model, json: &str, now: Instant) {
+    let hs: HostSettingsState = serde_json::from_str(json).unwrap();
+    m.stream_mut()
+        .unwrap()
+        .session
+        .apply(SessionEvent::HostSettings(hs), now);
+}
+
+fn panel_with(json: &str, now: Instant) -> Harness<'static, V> {
+    let mut m = stream_model(now, false);
+    with_settings(&mut m, json, now);
+    m.stream_mut().unwrap().panel = Some(StreamPanel::MacSettings);
+    start(m, now)
+}
+
+fn combo<'a>(h: &'a Harness<'static, V>) -> egui_kittest::Node<'a> {
+    h.get_by_role_and_label(egui::accesskit::Role::ComboBox, texts::QUALITY)
+}
+
+fn single(out: &[Msg]) -> HostSettingsChange {
+    assert_eq!(out.len(), 1, "{out:?}");
+    match &out[0] {
+        Msg::ChangeSettings(c) => c.clone(),
+        other => panic!("unexpected {other:?}"),
+    }
+}
+
+#[test]
+fn streaming_section_shows_the_macs_values() {
+    let now = Instant::now();
+    let h = panel_with(FULL, now);
+    assert_eq!(
+        combo(&h).accesskit_node().value().as_deref(),
+        Some("Balanced — 15 Mbps")
+    );
+    for l in [
+        texts::RETINA,
+        texts::STANDARD,
+        texts::FPS_60,
+        texts::FPS_120,
+        texts::PRIORITIZE_SPEED,
+        texts::VIRTUAL_DISPLAY,
+        texts::NOT_PERSISTENT,
+        texts::DIRECT_WIRELESS,
+    ] {
+        h.get_by_label(l);
+    }
+    for l in [
+        texts::virtual_display_note("Studio"),
+        texts::applies_to_every_device("Studio"),
+        texts::now_streaming(2880, 1800, 60, 15),
+        texts::counts_as_away("Studio"),
+        texts::direct_wireless_note("Studio"),
+    ] {
+        h.get_by_label(&l);
+    }
+    assert!(h.state().out.is_empty(), "{:?}", h.state().out);
+}
+
+#[test]
+fn custom_bitrate_is_shown_not_offered() {
+    let now = Instant::now();
+    let json = FULL.replace("15000000", "12000000");
+    let mut h = panel_with(&json, now);
+    assert_eq!(
+        combo(&h).accesskit_node().value().as_deref(),
+        Some("Custom — 12 Mbps")
+    );
+    combo(&h).click();
+    h.run();
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "Low — 4 Mbps");
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "Extreme — 150 Mbps");
+    assert!(h
+        .query_by_role_and_label(egui::accesskit::Role::Button, "Custom — 12 Mbps")
+        .is_none());
+}
+
+#[test]
+fn quality_pick_emits_one_field() {
+    let now = Instant::now();
+    let mut h = panel_with(FULL, now);
+    combo(&h).click();
+    h.run();
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "High — 25 Mbps")
+        .click();
+    h.run();
+    assert_eq!(
+        single(&h.state().out),
+        HostSettingsChange {
+            bitrate: Some(25_000_000),
+            ..Default::default()
+        }
+    );
+}
+
+#[test]
+fn radios_and_switches_emit_one_field_each() {
+    let now = Instant::now();
+    let cases: [(&str, HostSettingsChange); 5] = [
+        (
+            texts::STANDARD,
+            HostSettingsChange {
+                capture_scale: Some(1.0),
+                ..Default::default()
+            },
+        ),
+        (
+            texts::FPS_60,
+            HostSettingsChange {
+                max_fps: Some(60),
+                ..Default::default()
+            },
+        ),
+        (
+            texts::PRIORITIZE_SPEED,
+            HostSettingsChange {
+                prioritize_speed: Some(true),
+                ..Default::default()
+            },
+        ),
+        (
+            texts::VIRTUAL_DISPLAY,
+            HostSettingsChange {
+                virtual_display: Some(true),
+                ..Default::default()
+            },
+        ),
+        (
+            texts::DIRECT_WIRELESS,
+            HostSettingsChange {
+                direct_wireless: Some(true),
+                ..Default::default()
+            },
+        ),
+    ];
+    for (label, want) in cases {
+        let mut h = panel_with(FULL, now);
+        h.get_by_label(label).click();
+        h.run();
+        assert_eq!(single(&h.state().out), want, "{label}");
+    }
+}
+
+#[test]
+fn virtual_display_disabled_only_when_unavailable_and_off() {
+    let now = Instant::now();
+    let note = "Start SillHost with --virtual-display.";
+    let off = FULL.replace(
+        "\"virtualDisplayAvailable\": true",
+        &format!("\"virtualDisplayAvailable\": false, \"virtualDisplayNote\": \"{note}\""),
+    );
+    let mut h = panel_with(&off, now);
+    assert!(h
+        .get_by_label(texts::VIRTUAL_DISPLAY)
+        .accesskit_node()
+        .is_disabled());
+    h.get_by_label(note);
+    assert!(h
+        .query_by_label(&texts::virtual_display_note("Studio"))
+        .is_none());
+    h.get_by_label(texts::VIRTUAL_DISPLAY).click();
+    h.run();
+    assert!(h.state().out.is_empty(), "{:?}", h.state().out);
+
+    let on = off.replace("\"virtualDisplay\": false", "\"virtualDisplay\": true");
+    let mut h = panel_with(&on, now);
+    assert!(!h
+        .get_by_label(texts::VIRTUAL_DISPLAY)
+        .accesskit_node()
+        .is_disabled());
+    h.get_by_label(texts::VIRTUAL_DISPLAY).click();
+    h.run();
+    assert_eq!(
+        single(&h.state().out),
+        HostSettingsChange {
+            virtual_display: Some(false),
+            ..Default::default()
+        }
+    );
+}
+
+#[test]
+fn no_direct_wireless_row_without_the_field() {
+    let now = Instant::now();
+    let json = FULL.replace(r#", "directWireless": false"#, "");
+    let h = panel_with(&json, now);
+    assert!(h.query_by_label(texts::DIRECT_WIRELESS).is_none());
+    assert!(h
+        .query_by_label(&texts::direct_wireless_note("Studio"))
+        .is_none());
+}
+
+#[test]
+fn pending_pick_renders_with_spinner() {
+    let now = Instant::now();
+    let mut m = stream_model(now, false);
+    with_settings(&mut m, FULL, now);
+    let s = m.stream_mut().unwrap();
+    s.panel = Some(StreamPanel::MacSettings);
+    s.session.settings.pick(
+        &HostSettingsChange {
+            max_fps: Some(60),
+            ..Default::default()
+        },
+        1,
+        now,
+    );
+    let early = m.clone();
+    let h = start_spinning(m, now + Duration::from_millis(400));
+    assert_eq!(
+        h.query_all_by_role(egui::accesskit::Role::ProgressIndicator)
+            .count(),
+        1
+    );
+    let h2 = start_spinning(early, now + Duration::from_millis(299));
+    assert_eq!(
+        h2.query_all_by_role(egui::accesskit::Role::ProgressIndicator)
+            .count(),
+        0
+    );
+    h.get_by_label(texts::RETINA);
+    let fps60 = h.get_by_label(texts::FPS_60);
+    assert_eq!(
+        fps60.accesskit_node().toggled(),
+        Some(egui::accesskit::Toggled::True)
+    );
+}
+
+#[test]
+fn panel_open_while_not_connected_shows_only_not_streaming() {
+    let now = Instant::now();
+    let mut m = stream_model(now, false);
+    with_settings(&mut m, FULL, now);
+    let s = m.stream_mut().unwrap();
+    s.panel = Some(StreamPanel::MacSettings);
+    s.session.apply(
+        SessionEvent::Ended {
+            text: String::new(),
+            retry_in: Some(Duration::from_secs(4)),
+            kind: EndKind::Lost,
+        },
+        now,
+    );
+    assert!(!s.session.is_connected());
+    let h = start(m, now);
+    h.get_by_label(texts::NOT_STREAMING);
+    assert!(h
+        .query_all_by_role(egui::accesskit::Role::ProgressIndicator)
+        .next()
+        .is_none());
+    assert!(h
+        .query_by_role_and_label(egui::accesskit::Role::ComboBox, texts::QUALITY)
+        .is_none());
+    assert!(h.query_by_label(texts::LOADING_SETTINGS).is_none());
+}
+
+#[test]
+fn link_toast_button_emits_lower_quality() {
+    let now = Instant::now();
+    let toast = |action| Toast {
+        text: texts::link_behind("Studio"),
+        until: now + Duration::from_secs(3),
+        action,
+    };
+    let mut m = stream_model(now, false);
+    m.toasts = vec![toast(Some(ToastAction::LowerQuality))];
+    let mut h = start(m, now);
+    h.get_by_label(texts::LOWER_QUALITY).click();
+    h.run();
+    assert!(
+        h.state()
+            .out
+            .iter()
+            .any(|m| matches!(m, Msg::ToastAction(ToastAction::LowerQuality))),
+        "{:?}",
+        h.state().out
+    );
+
+    let mut m = stream_model(now, false);
+    m.toasts = vec![toast(None)];
+    let h = start(m, now);
+    assert!(h.query_by_label(texts::LOWER_QUALITY).is_none());
 }
